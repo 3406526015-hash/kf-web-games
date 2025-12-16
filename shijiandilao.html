@@ -1,0 +1,524 @@
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>时间切片地牢 (Time Slice Dungeon)</title>
+    <style>
+        body {
+            background-color: #111;
+            color: #eee;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+            user-select: none; /* 防止双击选中文字 */
+        }
+
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
+        }
+
+        canvas {
+            background-color: #141419;
+            display: block;
+            border: 2px solid #333;
+        }
+
+        /* UI 悬浮层 */
+        #ui-layer {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            pointer-events: none;
+            text-shadow: 1px 1px 0 #000;
+            z-index: 10;
+        }
+
+        .stat-row {
+            margin-bottom: 5px;
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        #msg-log {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #ffcc00;
+            font-size: 14px;
+            max-width: 620px;
+            background-color: rgba(0,0,0,0.5);
+            padding: 2px 5px;
+            border-radius: 4px;
+        }
+
+        .controls {
+            margin-top: 15px;
+            color: #888;
+            font-size: 14px;
+            text-align: center;
+        }
+
+        .key {
+            display: inline-block;
+            border: 1px solid #555;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #222;
+            color: #fff;
+            font-weight: bold;
+            margin: 0 2px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="640" height="640"></canvas>
+        
+        <div id="ui-layer">
+            <div class="stat-row" style="color: #4facfe;">HP: <span id="hp-val">10</span>/10</div>
+            <div class="stat-row" style="color: #00f260;">时间碎片: <span id="frag-val">3</span></div>
+            <div class="stat-row" style="color: #888; font-size: 14px;">回合: <span id="turn-val">0</span></div>
+        </div>
+
+        <div id="msg-log">欢迎来到时间切片地牢...</div>
+    </div>
+
+    <div class="controls">
+        <div style="margin-bottom:5px;">移动: <span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> 
+        | 召唤影子: <span class="key">SPACE</span>
+        | 重置: <span class="key">R</span></div>
+        <div style="font-size: 12px; color: #666;">(机制：影子会重播你5回合前的动作，并帮你吸引仇恨)</div>
+    </div>
+
+<script>
+/**
+ * 游戏核心配置
+ */
+const GRID_SIZE = 32;
+const GRID_W = 20;
+const GRID_H = 20;
+const CANVAS_SIZE = GRID_SIZE * GRID_W; // 640px
+
+// 颜色主题
+const COLORS = {
+    bg: '#141419',
+    grid: '#1f1f25',
+    player: '#4facfe',    // 蓝色主角
+    shadow: 'rgba(120, 144, 156, 0.7)', // 半透明灰色影子
+    enemy: '#ff4b1f',     // 红色敌人
+    enemyBorder: '#8a1c00'
+};
+
+// Canvas 上下文
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// UI 元素
+const ui = {
+    hp: document.getElementById('hp-val'),
+    frag: document.getElementById('frag-val'),
+    turn: document.getElementById('turn-val'),
+    log: document.getElementById('msg-log')
+};
+
+// 游戏全局状态
+let game = {
+    turn: 0,
+    over: false,
+    player: null,
+    enemies: [],
+    shadows: [],
+    logMsg: "WASD移动，空格键消耗1碎片召唤影子。"
+};
+
+// --- 类定义 ---
+
+class Entity {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.color = color;
+        this.hp = 1;
+        this.maxHp = 1;
+        this.dead = false;
+    }
+
+    draw() {
+        if (this.dead) return;
+        
+        // 绘制主体
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x * GRID_SIZE + 2, this.y * GRID_SIZE + 2, GRID_SIZE - 4, GRID_SIZE - 4);
+        
+        // 如果是敌人，加个边框让它看起来凶一点
+        if (this instanceof Enemy) {
+            ctx.strokeStyle = COLORS.enemyBorder;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(this.x * GRID_SIZE + 3, this.y * GRID_SIZE + 3, GRID_SIZE - 6, GRID_SIZE - 6);
+        }
+
+        // 血条 (仅当最大血量 > 1 且受过伤时显示，或者主角一直显示)
+        if (this.maxHp > 1) {
+            const pct = Math.max(0, this.hp / this.maxHp);
+            // 血条背景
+            ctx.fillStyle = '#333';
+            ctx.fillRect(this.x * GRID_SIZE + 4, this.y * GRID_SIZE + GRID_SIZE - 6, GRID_SIZE - 8, 4);
+            // 血条前景
+            ctx.fillStyle = pct > 0.5 ? '#0f0' : '#f00';
+            ctx.fillRect(this.x * GRID_SIZE + 4, this.y * GRID_SIZE + GRID_SIZE - 6, (GRID_SIZE - 8) * pct, 4);
+        }
+    }
+}
+
+class Player extends Entity {
+    constructor(x, y) {
+        super(x, y, COLORS.player);
+        this.hp = 10;
+        this.maxHp = 10;
+        this.fragments = 3; // 初始资源
+        this.maxFragments = 5;
+        this.history = []; // 记录历史轨迹 [{x,y}, {x,y}...]
+        this.recordHistory();
+    }
+
+    recordHistory() {
+        // 记录每一回合的位置
+        this.history.push({x: this.x, y: this.y});
+        // 保持历史记录不超过 25 条 (稍微多留一点余量)
+        if (this.history.length > 25) {
+            this.history.shift();
+        }
+    }
+}
+
+class Shadow extends Entity {
+    constructor(x, y, path) {
+        super(x, y, COLORS.shadow);
+        this.hp = 3;     // 影子血量
+        this.maxHp = 3;
+        this.path = path; // 未来的行动路径
+        this.life = 5;    // 存在回合数
+        this.stepIndex = 0;
+    }
+
+    act() {
+        this.life--;
+        // 寿命耗尽
+        if (this.life < 0) {
+            this.dead = true;
+            return;
+        }
+
+        // 沿着路径移动
+        if (this.stepIndex < this.path.length) {
+            const nextPos = this.path[this.stepIndex];
+            
+            // 检测是否有敌人阻挡
+            let blockedEnemy = game.enemies.find(e => !e.dead && e.x === nextPos.x && e.y === nextPos.y);
+            
+            if (blockedEnemy) {
+                // 攻击敌人
+                blockedEnemy.hp--;
+                if (blockedEnemy.hp <= 0) {
+                    blockedEnemy.dead = true;
+                    log("影子击杀了敌人！");
+                    // 影子击杀也给玩家回能
+                    game.player.fragments = Math.min(game.player.fragments + 1, game.player.maxFragments);
+                }
+                // 攻击消耗了这一步动作，位置不变
+            } else {
+                // 移动
+                this.x = nextPos.x;
+                this.y = nextPos.y;
+            }
+            this.stepIndex++;
+        } else {
+            // 路径走完，消失
+            this.dead = true;
+        }
+    }
+}
+
+class Enemy extends Entity {
+    constructor(x, y) {
+        super(x, y, COLORS.enemy);
+        this.hp = 3;
+        this.maxHp = 3;
+    }
+
+    act() {
+        if (this.dead) return;
+
+        // AI逻辑：寻找最近的目标（玩家 或 影子）
+        let targets = [game.player];
+        // 把活着的影子也加入目标列表
+        game.shadows.forEach(s => { if (!s.dead) targets.push(s); });
+
+        let target = null;
+        let minDst = 9999;
+
+        // 简单的曼哈顿距离寻找最近者
+        targets.forEach(t => {
+            const dst = Math.abs(t.x - this.x) + Math.abs(t.y - this.y);
+            if (dst < minDst) {
+                minDst = dst;
+                target = t;
+            }
+        });
+
+        if (!target) return; // 应该不会发生
+
+        // 寻路逻辑：向目标移动
+        let dx = 0, dy = 0;
+        if (target.x > this.x) dx = 1;
+        else if (target.x < this.x) dx = -1;
+        else if (target.y > this.y) dy = 1;
+        else if (target.y < this.y) dy = -1;
+
+        const destX = this.x + dx;
+        const destY = this.y + dy;
+
+        // 碰撞检测
+        // 1. 攻击目标
+        if (destX === target.x && destY === target.y) {
+            target.hp--;
+            if (target === game.player) {
+                log("警告：你受到了伤害！");
+                checkGameOver();
+            } else if (target instanceof Shadow) {
+                if(target.hp <= 0) {
+                    target.dead = true;
+                    log("影子被击散了！");
+                }
+            }
+            return; // 攻击后回合结束
+        }
+
+        // 2. 避免与其他敌人重叠
+        let blocked = game.enemies.some(e => !e.dead && e !== this && e.x === destX && e.y === destY);
+        if (!blocked) {
+            this.x = destX;
+            this.y = destY;
+        }
+    }
+}
+
+// --- 游戏主逻辑 ---
+
+function init() {
+    game.turn = 0;
+    game.over = false;
+    game.player = new Player(5, 5);
+    game.enemies = [];
+    game.shadows = [];
+    game.logMsg = "游戏开始。WASD移动，空格召唤影子。";
+    
+    // 初始刷怪
+    for(let i=0; i<3; i++) spawnEnemy();
+
+    render();
+}
+
+function spawnEnemy() {
+    // 随机生成敌人，但不要太靠近玩家
+    let ex, ey;
+    let attempts = 0;
+    do {
+        ex = Math.floor(Math.random() * GRID_W);
+        ey = Math.floor(Math.random() * GRID_H);
+        attempts++;
+    } while (
+        (Math.abs(ex - game.player.x) + Math.abs(ey - game.player.y) < 6) && attempts < 50
+    );
+    
+    game.enemies.push(new Enemy(ex, ey));
+}
+
+function log(msg) {
+    game.logMsg = msg;
+    renderUI();
+}
+
+function summonShadow() {
+    if (game.over) return;
+    
+    const p = game.player;
+    const REPLAY_DELAY = 5; // 倒带时间：5回合前
+
+    if (p.fragments <= 0) {
+        log("时间碎片不足！(需要1点)");
+        return;
+    }
+
+    // 检查历史是否足够长
+    // 我们需要回溯到 history[length - 1 - 5]
+    if (p.history.length <= REPLAY_DELAY) {
+        log("还没有积累足够的‘过去’来召唤影子。(请再走几步)");
+        return;
+    }
+
+    p.fragments--;
+
+    // --- 核心机制：时间切片 ---
+    // 1. 找到生成点：当前时间点往回数 5 个回合的位置
+    const startIndex = p.history.length - 1 - REPLAY_DELAY;
+    const startPos = p.history[startIndex];
+
+    // 2. 找到路径：从生成点开始，接下来 5 回合玩家曾走过的路
+    // slice 截取 [startIndex+1 ... startIndex+6]
+    const pathSlice = p.history.slice(startIndex + 1, startIndex + 1 + 5);
+
+    // 3. 生成实体
+    const shadow = new Shadow(startPos.x, startPos.y, pathSlice);
+    game.shadows.push(shadow);
+    
+    log("【时间切片】过去的你加入了战斗！");
+    render(); // 刷新显示，但不推进回合
+}
+
+function gameLoop(dx, dy) {
+    if (game.over) return;
+
+    const p = game.player;
+    const targetX = p.x + dx;
+    const targetY = p.y + dy;
+
+    // --- 1. 玩家行动 ---
+    if (targetX >= 0 && targetX < GRID_W && targetY >= 0 && targetY < GRID_H) {
+        // 检查是否有活着的敌人
+        let hitEnemy = game.enemies.find(e => !e.dead && e.x === targetX && e.y === targetY);
+        
+        if (hitEnemy) {
+            // 攻击敌人
+            hitEnemy.hp--;
+            log("你攻击了敌人！");
+            if (hitEnemy.hp <= 0) {
+                hitEnemy.dead = true;
+                log("敌人被消灭！(+1 时间碎片)");
+                p.fragments = Math.min(p.fragments + 1, p.maxFragments);
+            }
+        } else {
+            // 普通移动
+            p.x = targetX;
+            p.y = targetY;
+        }
+    }
+
+    // 记录历史 (非常重要：无论移动还是攻击，时间都在流逝，当前位置都要记录)
+    p.recordHistory();
+
+    // --- 2. 影子行动 ---
+    game.shadows.forEach(s => s.act());
+
+    // --- 3. 敌人行动 ---
+    game.enemies.forEach(e => e.act());
+
+    // --- 4. 清理战场 ---
+    game.shadows = game.shadows.filter(s => !s.dead);
+    game.enemies = game.enemies.filter(e => !e.dead);
+    
+    // --- 5. 游戏进程 ---
+    game.turn++;
+    // 难度曲线：每10回合生成一个新敌人
+    if (game.turn % 10 === 0) {
+        spawnEnemy();
+    }
+
+    render();
+}
+
+function checkGameOver() {
+    if (game.player.hp <= 0) {
+        game.over = true;
+        log("你死亡了... [按 R 重新开始]");
+    }
+}
+
+// --- 渲染逻辑 ---
+
+function render() {
+    // 1. 清除画布
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    // 2. 画网格线
+    ctx.strokeStyle = COLORS.grid;
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= GRID_W; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * GRID_SIZE, 0);
+        ctx.lineTo(i * GRID_SIZE, CANVAS_SIZE);
+        ctx.stroke();
+    }
+    for (let i = 0; i <= GRID_H; i++) {
+        ctx.beginPath();
+        ctx.moveTo(0, i * GRID_SIZE);
+        ctx.lineTo(CANVAS_SIZE, i * GRID_SIZE);
+        ctx.stroke();
+    }
+
+    // 3. 绘制所有实体
+    // 顺序决定层级：影子最底，敌人中间，玩家最上
+    game.shadows.forEach(s => s.draw());
+    game.enemies.forEach(e => e.draw());
+    if (!game.over) game.player.draw();
+
+    // 4. 绘制 UI 数据
+    renderUI();
+    
+    // 5. 游戏结束画面
+    if (game.over) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+        
+        ctx.fillStyle = '#ff3333';
+        ctx.font = 'bold 40px Courier New';
+        ctx.textAlign = 'center';
+        ctx.fillText("GAME OVER", CANVAS_SIZE/2, CANVAS_SIZE/2 - 20);
+        
+        ctx.fillStyle = '#fff';
+        ctx.font = '20px Courier New';
+        ctx.fillText("Press [R] to Restart", CANVAS_SIZE/2, CANVAS_SIZE/2 + 30);
+    }
+}
+
+function renderUI() {
+    ui.hp.innerText = game.player.hp;
+    ui.frag.innerText = game.player.fragments;
+    ui.turn.innerText = game.turn;
+    ui.log.innerText = game.logMsg;
+}
+
+// --- 输入监听 ---
+
+window.addEventListener('keydown', (e) => {
+    if (game.over) {
+        if (e.key.toLowerCase() === 'r') init();
+        return;
+    }
+
+    switch(e.key.toLowerCase()) {
+        case 'w': gameLoop(0, -1); break;
+        case 's': gameLoop(0, 1); break;
+        case 'a': gameLoop(-1, 0); break;
+        case 'd': gameLoop(1, 0); break;
+        case ' ': summonShadow(); break; // 空格键
+    }
+});
+
+// 启动游戏
+init();
+
+</script>
+</body>
+</html>
+```

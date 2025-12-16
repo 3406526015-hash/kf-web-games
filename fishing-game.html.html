@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>终极捕鱼达人 - 暴爽版</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            bottom: 10px;
+            left: 20px;
+            color: #fff;
+            z-index: 10;
+            pointer-events: none;
+            text-shadow: 0 0 5px #000;
+        }
+        .score-box {
+            font-size: 32px;
+            color: #ffd700;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .energy-bar-container {
+            width: 300px;
+            height: 20px;
+            background: rgba(0,0,0,0.5);
+            border: 2px solid #fff;
+            border-radius: 10px;
+            margin-top: 10px;
+            overflow: hidden;
+            position: relative;
+        }
+        #energy-bar {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #f00, #ff0);
+            transition: width 0.1s;
+        }
+        #energy-text {
+            position: absolute;
+            width: 100%;
+            text-align: center;
+            top: 0;
+            line-height: 20px;
+            font-size: 14px;
+            font-weight: bold;
+            text-shadow: 0 0 2px #000;
+        }
+        #tutorial {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            text-align: center;
+            font-size: 24px;
+            background: rgba(0,0,0,0.7);
+            padding: 20px;
+            border-radius: 20px;
+            pointer-events: none;
+            transition: opacity 0.5s;
+            z-index: 20;
+        }
+        /* 激光闪烁动画 */
+        .laser-ready {
+            box-shadow: 0 0 15px #f00;
+            animation: pulse 0.5s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div class="score-box">
+            <span>💰</span>
+            <span id="score">0</span>
+        </div>
+        <div class="energy-bar-container" id="energy-container">
+            <div id="energy-bar"></div>
+            <div id="energy-text">能量蓄积中... (右键释放激光)</div>
+        </div>
+    </div>
+
+    <div id="tutorial">
+        <h1>🌊 终极捕鱼 🌊</h1>
+        <p>左键发射网 | 滚轮切换炮台</p>
+        <p>能量满后 <span style="color: #ff4d4d; font-weight: bold;">右键</span> 释放毁灭激光</p>
+        <p>点击任意处开始</p>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script>
+        // === 游戏配置 ===
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        let width, height;
+        let score = 1000; // 初始金币
+        let energy = 0;
+        const MAX_ENERGY = 1000;
+        let gameActive = false;
+        
+        // 炮台配置
+        let cannonLevel = 1;
+        const MAX_CANNON_LEVEL = 5;
+        
+        // 对象池
+        const fishes = [];
+        const bullets = [];
+        const particles = [];
+        const coins = [];
+        const texts = [];
+        const nets = [];
+        
+        // 屏幕震动参数
+        let shakeIntensity = 0;
+
+        // 鼠标
+        const mouse = { x: 0, y: 0, down: false };
+
+        // === 初始化 ===
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // === 鱼类定义 (程序化绘制，无需图片) ===
+        const FISH_TYPES = [
+            { id: 1, hp: 10, speed: 2, value: 10, color: '#4fd', size: 15, name: '小丑鱼' },
+            { id: 2, hp: 30, speed: 1.5, value: 30, color: '#ff6', size: 25, name: '黄金鱼' },
+            { id: 3, hp: 60, speed: 1.2, value: 60, color: '#f44', size: 35, name: '红鲷' },
+            { id: 4, hp: 150, speed: 0.8, value: 150, color: '#d0f', size: 50, name: '魔鬼鱼' },
+            { id: 5, hp: 500, speed: 0.5, value: 500, color: '#fa0', size: 80, name: 'BOSS金鲨' } // BOSS
+        ];
+
+        class Fish {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                const type = Math.random();
+                let typeConfig;
+                if (type > 0.98) typeConfig = FISH_TYPES[4]; // 2% 概率出BOSS
+                else if (type > 0.9) typeConfig = FISH_TYPES[3];
+                else if (type > 0.7) typeConfig = FISH_TYPES[2];
+                else if (type > 0.4) typeConfig = FISH_TYPES[1];
+                else typeConfig = FISH_TYPES[0];
+
+                this.type = typeConfig;
+                this.hp = typeConfig.hp;
+                this.maxHp = typeConfig.hp;
+                this.value = typeConfig.value;
+                
+                // 从左侧或右侧生成
+                this.direction = Math.random() > 0.5 ? 1 : -1;
+                this.x = this.direction === 1 ? -100 : width + 100;
+                this.y = Math.random() * (height - 150) + 50;
+                
+                this.vx = this.direction * (typeConfig.speed + Math.random() * 0.5);
+                this.vy = 0;
+                this.wobble = Math.random() * Math.PI * 2;
+                
+                this.active = true;
+                this.hitFlash = 0; // 受击闪白
+            }
+
+            update() {
+                if (!this.active) return;
+                
+                // 游动逻辑
+                this.x += this.vx;
+                this.wobble += 0.1;
+                this.y += Math.sin(this.wobble) * 0.5; // 上下浮动
+
+                if (this.hitFlash > 0) this.hitFlash--;
+
+                // 出界回收
+                if ((this.direction === 1 && this.x > width + 100) || 
+                    (this.direction === -1 && this.x < -100)) {
+                    this.active = false;
+                }
+            }
+
+            draw() {
+                if (!this.active) return;
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.scale(this.direction, 1); // 翻转方向
+                
+                // 受击变白
+                if (this.hitFlash > 0) {
+                    ctx.fillStyle = '#fff';
+                } else {
+                    ctx.fillStyle = this.type.color;
+                }
+
+                // 画鱼身 (简单的程序化图形)
+                ctx.beginPath();
+                if (this.type.id === 5) { // 鲨鱼形状
+                    ctx.ellipse(0, 0, this.type.size, this.type.size/2.5, 0, 0, Math.PI*2);
+                    ctx.fill();
+                    // 尾巴
+                    ctx.beginPath();
+                    ctx.moveTo(-this.type.size + 10, 0);
+                    ctx.lineTo(-this.type.size - 30, Math.sin(this.wobble)*15 - 15);
+                    ctx.lineTo(-this.type.size - 30, Math.sin(this.wobble)*15 + 15);
+                    ctx.fill();
+                    // 鱼鳍
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath();
+                    ctx.moveTo(10, -10);
+                    ctx.lineTo(-10, -this.type.size/1.5);
+                    ctx.lineTo(-20, -10);
+                    ctx.fill();
+                } else if (this.type.id === 4) { // 魔鬼鱼形状
+                    ctx.beginPath();
+                    ctx.moveTo(20, 0);
+                    ctx.lineTo(-20, -this.type.size);
+                    ctx.lineTo(-20, this.type.size);
+                    ctx.fill();
+                    // 尾巴鞭子
+                    ctx.strokeStyle = this.type.color;
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.moveTo(-20, 0);
+                    ctx.quadraticCurveTo(-50, Math.sin(this.wobble)*20, -80, 0);
+                    ctx.stroke();
+                } else {
+                    // 普通鱼形状
+                    ctx.ellipse(0, 0, this.type.size, this.type.size/1.8, 0, 0, Math.PI*2);
+                    ctx.fill();
+                    // 尾巴
+                    ctx.beginPath();
+                    ctx.moveTo(-this.type.size + 5, 0);
+                    let tailW = Math.sin(this.wobble) * 5;
+                    ctx.lineTo(-this.type.size - 10, -10 + tailW);
+                    ctx.lineTo(-this.type.size - 10, 10 + tailW);
+                    ctx.fill();
+                }
+                
+                // 眼睛
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(this.type.size/2, -this.type.size/5, this.type.size/6, 0, Math.PI*2);
+                ctx.fill();
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.arc(this.type.size/2 + 2, -this.type.size/5, this.type.size/12, 0, Math.PI*2);
+                ctx.fill();
+
+                ctx.restore();
+
+                // 画血条 (只有BOSS和魔鬼鱼显示)
+                if (this.type.id >= 4 && this.hitFlash > 0) {
+                    ctx.fillStyle = 'red';
+                    ctx.fillRect(this.x - 30, this.y - 40, 60, 6);
+                    ctx.fillStyle = '#0f0';
+                    ctx.fillRect(this.x - 30, this.y - 40, 60 * (this.hp / this.type.maxHp), 6);
+                }
+            }
+        }
+
+        // === 炮弹与网 ===
+        class Bullet {
+            constructor(x, y, angle, level) {
+                this.x = x;
+                this.y = y;
+                this.angle = angle;
+                this.speed = 10 + level; // 等级越高子弹越快
+                this.level = level;
+                this.power = level * 10; // 伤害
+                this.active = true;
+            }
+
+            update() {
+                this.x += Math.cos(this.angle) * this.speed;
+                this.y += Math.sin(this.angle) * this.speed;
+
+                if (this.x < 0 || this.x > width || this.y < 0 || this.y > height) {
+                    this.active = false;
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                
+                // 子弹发光
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = '#ff0';
+                
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(0, 0, 5 + this.level, 0, Math.PI*2);
+                ctx.fill();
+                
+                // 拖尾
+                ctx.fillStyle = `rgba(255, 215, 0, 0.5)`;
+                ctx.fillRect(-20, -(3 + this.level/2), 20, 6 + this.level);
+                
+                ctx.restore();
+            }
+        }
+
+        class Net {
+            constructor(x, y, level) {
+                this.x = x;
+                this.y = y;
+                this.radius = 50 + level * 10;
+                this.life = 15; // 存在帧数
+                this.level = level;
+            }
+            
+            update() {
+                this.life--;
+            }
+            
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.globalAlpha = this.life / 15;
+                
+                ctx.beginPath();
+                ctx.arc(0, 0, this.radius, 0, Math.PI*2);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.fill();
+                
+                ctx.strokeStyle = '#0ff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                // 网格纹理
+                ctx.beginPath();
+                for(let i=-this.radius; i<this.radius; i+=15) {
+                    ctx.moveTo(i, -Math.sqrt(this.radius**2 - i**2));
+                    ctx.lineTo(i, Math.sqrt(this.radius**2 - i**2));
+                    ctx.moveTo(-Math.sqrt(this.radius**2 - i**2), i);
+                    ctx.lineTo(Math.sqrt(this.radius**2 - i**2), i);
+                }
+                ctx.stroke();
+                
+                ctx.restore();
+            }
+        }
+
+        // === 特效系统 (金币、文字、粒子) ===
+        class Coin {
+            constructor(x, y, value) {
+                this.x = x;
+                this.y = y;
+                this.value = value;
+                // 目标是左下角钱袋
+                this.tx = 60;
+                this.ty = height - 40;
+                this.vx = (Math.random() - 0.5) * 10;
+                this.vy = (Math.random() - 0.5) * 10;
+                this.timer = 0;
+                this.state = 'scatter'; // scatter -> fly
+            }
+
+            update() {
+                this.timer++;
+                if (this.state === 'scatter') {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    this.vy += 0.5; // 重力
+                    if (this.y > height - 50) this.vy *= -0.6; // 地面反弹
+                    
+                    if (this.timer > 30) this.state = 'fly';
+                } else {
+                    // 飞向UI
+                    const dx = this.tx - this.x;
+                    const dy = this.ty - this.y;
+                    this.x += dx * 0.1;
+                    this.y += dy * 0.1;
+                    
+                    if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+                        score += this.value;
+                        addEnergy(this.value / 2); // 增加能量
+                        return false; // 移除
+                    }
+                }
+                return true;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                // 旋转动画
+                ctx.scale(Math.sin(this.timer * 0.5), 1);
+                
+                ctx.beginPath();
+                ctx.arc(0, 0, 10, 0, Math.PI*2);
+                ctx.fillStyle = '#ffd700'; // 金色
+                ctx.fill();
+                ctx.strokeStyle = '#b8860b';
+                ctx.stroke();
+                
+                ctx.fillStyle = '#b8860b';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('￥', 0, 1);
+                
+                ctx.restore();
+            }
+        }
+
+        class FloatingText {
+            constructor(x, y, text, color) {
+                this.x = x;
+                this.y = y;
+                this.text = text;
+                this.color = color;
+                this.life = 60;
+                this.dy = -1;
+            }
+            update() {
+                this.y += this.dy;
+                this.life--;
+            }
+            draw() {
+                ctx.globalAlpha = Math.max(0, this.life / 60);
+                ctx.fillStyle = this.color;
+                ctx.font = 'bold 24px Arial';
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 3;
+                ctx.strokeText(this.text, this.x, this.y);
+                ctx.fillText(this.text, this.x, this.y);
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.vx = (Math.random() - 0.5) * 5;
+                this.vy = (Math.random() - 0.5) * 5;
+                this.life = 30;
+                this.size = Math.random() * 5 + 2;
+            }
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life--;
+                this.size *= 0.9;
+            }
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.globalAlpha = this.life / 30;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        class LaserBeam {
+            constructor() {
+                this.active = false;
+                this.timer = 0;
+                this.maxTimer = 180; // 3秒激光
+                this.angle = -Math.PI/2;
+            }
+            
+            fire(angle) {
+                this.active = true;
+                this.timer = this.maxTimer;
+                this.angle = angle;
+                shakeIntensity = 20; // 剧烈震动
+            }
+            
+            update() {
+                if (!this.active) return;
+                
+                // 激光跟随鼠标
+                const dx = mouse.x - width/2;
+                const dy = mouse.y - height;
+                this.angle = Math.atan2(dy, dx);
+                
+                this.timer--;
+                if(this.timer <= 0) this.active = false;
+                
+                // 激光伤害逻辑：检测碰撞线段
+                if (this.timer % 5 === 0) { // 每5帧造成一次伤害
+                    shakeIntensity = 5;
+                    fishes.forEach(fish => {
+                        if (!fish.active) return;
+                        
+                        // 简单的角度检查，判断鱼是否在激光扇区内 (简化碰撞)
+                        const dx = fish.x - width/2;
+                        const dy = fish.y - height;
+                        const fishAngle = Math.atan2(dy, dx);
+                        const dist = Math.sqrt(dx*dx + dy*dy);
+                        
+                        // 角度差
+                        let diff = Math.abs(fishAngle - this.angle);
+                        if (diff > Math.PI) diff = Math.PI * 2 - diff;
+                        
+                        // 在激光宽度内 (距离越远宽度越宽)
+                        if (diff < 0.1 && dist < 1200) {
+                            hitFish(fish, 50, true); // 激光伤害50
+                            // 产生大量粒子
+                            for(let i=0; i<3; i++) {
+                                particles.push(new Particle(fish.x, fish.y, '#f00'));
+                            }
+                        }
+                    });
+                }
+            }
+            
+            draw() {
+                if (!this.active) return;
+                ctx.save();
+                ctx.translate(width/2, height);
+                ctx.rotate(this.angle);
+                
+                // 激光核心
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(2000, 0); // 超长
+                ctx.lineWidth = 20 + Math.sin(Date.now()/50)*10;
+                ctx.strokeStyle = '#fff';
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = '#f00';
+                ctx.lineCap = 'round';
+                ctx.stroke();
+                
+                // 激光外围
+                ctx.lineWidth = 50;
+                ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+                ctx.stroke();
+                
+                ctx.restore();
+            }
+        }
+
+        const laser = new LaserBeam();
+
+        // === 游戏控制函数 ===
+        
+        function spawnFish() {
+            // 动态控制鱼的数量，保持屏幕热闹
+            if (fishes.length < 20) {
+                fishes.push(new Fish());
+            }
+            // 偶尔生成一群鱼
+            if (Math.random() < 0.01) {
+                for(let i=0; i<5; i++) {
+                    setTimeout(() => fishes.push(new Fish()), i*200);
+                }
+            }
+        }
+
+        function hitFish(fish, damage, isLaser = false) {
+            fish.hp -= damage;
+            fish.hitFlash = 5;
+            
+            if (fish.hp <= 0) {
+                fish.active = false;
+                // 爆金币
+                const coinCount = Math.min(fish.type.value / 10 + 1, 20); // 最多爆20个
+                for(let i=0; i<coinCount; i++) {
+                    coins.push(new Coin(fish.x, fish.y, 10));
+                }
+                // 飘字
+                texts.push(new FloatingText(fish.x, fish.y, `+${fish.value}`, '#ffd700'));
+                // 粒子爆炸
+                for(let i=0; i<15; i++) {
+                    particles.push(new Particle(fish.x, fish.y, fish.type.color));
+                }
+                
+                // 如果是大鱼，震动屏幕
+                if (fish.type.id >= 4) {
+                    shakeIntensity = 15;
+                    texts.push(new FloatingText(width/2, height/2, "捕获巨物!", "#f00"));
+                }
+            }
+        }
+
+        function addEnergy(amount) {
+            energy += amount;
+            if (energy > MAX_ENERGY) energy = MAX_ENERGY;
+            
+            const bar = document.getElementById('energy-bar');
+            const container = document.getElementById('energy-container');
+            const text = document.getElementById('energy-text');
+            
+            const pct = (energy / MAX_ENERGY) * 100;
+            bar.style.width = `${pct}%`;
+            
+            if (energy >= MAX_ENERGY) {
+                container.classList.add('laser-ready');
+                text.innerText = "能量满溢！点击右键释放激光！";
+                text.style.color = "#fff";
+            } else {
+                container.classList.remove('laser-ready');
+                text.innerText = "能量蓄积中...";
+            }
+        }
+
+        // === 主循环 ===
+        function loop() {
+            requestAnimationFrame(loop);
+
+            // 清屏 (带微弱拖尾，增加速度感)
+            ctx.fillStyle = '#001a33';
+            ctx.fillRect(0, 0, width, height);
+            
+            // 绘制深海背景光
+            let gradient = ctx.createLinearGradient(0, 0, 0, height);
+            gradient.addColorStop(0, "#000814");
+            gradient.addColorStop(1, "#003366");
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, height);
+
+            // 屏幕震动应用
+            ctx.save();
+            if (shakeIntensity > 0) {
+                const dx = (Math.random() - 0.5) * shakeIntensity;
+                const dy = (Math.random() - 0.5) * shakeIntensity;
+                ctx.translate(dx, dy);
+                shakeIntensity *= 0.9;
+                if(shakeIntensity < 0.5) shakeIntensity = 0;
+            }
+
+            // 生成鱼
+            spawnFish();
+
+            // 更新实体
+            // 鱼
+            for (let i = fishes.length - 1; i >= 0; i--) {
+                const f = fishes[i];
+                f.update();
+                f.draw();
+                if (!f.active) fishes.splice(i, 1);
+            }
+
+            // 子弹
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const b = bullets[i];
+                b.update();
+                b.draw();
+                
+                // 子弹碰撞检测
+                if (b.active) {
+                    for (let f of fishes) {
+                        if (!f.active) continue;
+                        const dx = b.x - f.x;
+                        const dy = b.y - f.y;
+                        const dist = Math.sqrt(dx*dx + dy*dy);
+                        
+                        if (dist < f.type.size + 10) {
+                            // 命中
+                            b.active = false;
+                            nets.push(new Net(b.x, b.y, b.level));
+                            
+                            // 范围伤害
+                            fishes.forEach(target => {
+                                const tdx = target.x - b.x;
+                                const tdy = target.y - b.y;
+                                if (Math.sqrt(tdx*tdx + tdy*tdy) < 50 + b.level*10) {
+                                    hitFish(target, b.power);
+                                }
+                            });
+                            break; 
+                        }
+                    }
+                }
+                
+                if (!b.active) bullets.splice(i, 1);
+            }
+
+            // 网
+            for (let i = nets.length - 1; i >= 0; i--) {
+                nets[i].update();
+                nets[i].draw();
+                if (nets[i].life <= 0) nets.splice(i, 1);
+            }
+
+            // 激光
+            laser.update();
+            laser.draw();
+
+            // 粒子
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].update();
+                particles[i].draw();
+                if (particles[i].life <= 0) particles.splice(i, 1);
+            }
+
+            // 金币
+            for (let i = coins.length - 1; i >= 0; i--) {
+                if(!coins[i].update()) coins.splice(i, 1);
+                else coins[i].draw();
+            }
+
+            // 飘字
+            for (let i = texts.length - 1; i >= 0; i--) {
+                texts[i].update();
+                texts[i].draw();
+                if (texts[i].life <= 0) texts.splice(i, 1);
+            }
+
+            ctx.restore(); // 结束震动
+
+            // 绘制UI (炮台)
+            drawCannon();
+            
+            // 更新DOM UI
+            document.getElementById('score').innerText = Math.floor(score);
+        }
+
+        function drawCannon() {
+            const cx = width / 2;
+            const cy = height;
+            const dx = mouse.x - cx;
+            const dy = mouse.y - cy;
+            const angle = Math.atan2(dy, dx);
+
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(angle); // 炮台旋转
+
+            // 炮管
+            ctx.fillStyle = '#444';
+            ctx.fillRect(0, -20, 60, 40);
+            
+            // 炮管升级效果
+            ctx.fillStyle = `hsl(${cannonLevel * 60}, 100%, 50%)`;
+            ctx.fillRect(10, -15, 40, 30);
+            
+            // 炮口
+            ctx.fillStyle = '#222';
+            ctx.beginPath();
+            ctx.arc(60, 0, 22, 0, Math.PI*2);
+            ctx.fill();
+
+            // 能量槽 (在炮身上)
+            if (laser.active) {
+                ctx.fillStyle = '#f00';
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = 'red';
+                ctx.fillRect(-10, -25, 100, 50);
+            }
+
+            ctx.restore();
+
+            // 底座
+            ctx.beginPath();
+            ctx.arc(cx, cy, 50, Math.PI, 0);
+            ctx.fillStyle = '#333';
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            // 炮台等级文字
+            ctx.fillStyle = '#fff';
+            ctx.font = '20px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(`Lv.${cannonLevel}`, cx, cy - 10);
+            
+            // 准心
+            ctx.beginPath();
+            ctx.arc(mouse.x, mouse.y, 10, 0, Math.PI*2);
+            ctx.strokeStyle = 'rgba(255,0,0,0.5)';
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(mouse.x - 15, mouse.y);
+            ctx.lineTo(mouse.x + 15, mouse.y);
+            ctx.moveTo(mouse.x, mouse.y - 15);
+            ctx.lineTo(mouse.x, mouse.y + 15);
+            ctx.stroke();
+        }
+
+        // === 事件监听 ===
+        
+        window.addEventListener('mousemove', e => {
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+        });
+
+        window.addEventListener('mousedown', e => {
+            if (!gameActive) {
+                gameActive = true;
+                document.getElementById('tutorial').style.opacity = 0;
+            }
+            
+            // 右键释放激光
+            if (e.button === 2) {
+                if (energy >= MAX_ENERGY) {
+                    const dx = mouse.x - width/2;
+                    const dy = mouse.y - height;
+                    laser.fire(Math.atan2(dy, dx));
+                    energy = 0;
+                    addEnergy(0); // 更新UI
+                }
+                return;
+            }
+
+            // 左键开炮
+            const cost = cannonLevel * 2; // 开炮成本
+            if (score >= cost) {
+                score -= cost;
+                
+                const cx = width / 2;
+                const cy = height;
+                const angle = Math.atan2(mouse.y - cy, mouse.x - cx);
+                
+                bullets.push(new Bullet(cx + Math.cos(angle)*60, cy + Math.sin(angle)*60, angle, cannonLevel));
+                
+                // 后坐力效果
+                shakeIntensity = 2; 
+            } else {
+                texts.push(new FloatingText(width/2, height-100, "金币不足!", "#f00"));
+            }
+        });
+
+        // 禁用右键菜单
+        window.addEventListener('contextmenu', e => e.preventDefault());
+
+        // 滚轮切换炮台
+        window.addEventListener('wheel', e => {
+            if (e.deltaY < 0) {
+                cannonLevel++;
+                if (cannonLevel > MAX_CANNON_LEVEL) cannonLevel = MAX_CANNON_LEVEL;
+            } else {
+                cannonLevel--;
+                if (cannonLevel < 1) cannonLevel = 1;
+            }
+            texts.push(new FloatingText(width/2, height-120, `切换炮台: Lv.${cannonLevel}`, "#fff"));
+        });
+
+        // 启动
+        loop();
+
+    </script>
+</body>
+</html>

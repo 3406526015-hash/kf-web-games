@@ -1,0 +1,1937 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>蓝白粒子爱心 + 光环</title>
+  <style>
+    html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+    canvas { display:block; }
+    .hud {
+      position:fixed; left:12px; bottom:12px; color:#dbe8ff;
+      font: 12px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background:rgba(20,22,28,.5); border:1px solid rgba(255,255,255,.12);
+      border-radius:8px; padding:8px 10px; backdrop-filter: blur(4px);
+    }
+    /* 满屏粒子烟花覆盖层（在 WebGL 画布之上，但通过前景遮挡矩形避免覆盖爱心台），视觉上只在“后景” */
+    #fwOverlay {
+      position: fixed; left: 0; top: 0; width: 100vw; height: 100vh;
+      z-index: 6; pointer-events: none; /* 默认不拦截鼠标，作为纯装饰层 */
+    }
+  </style>
+</head>
+<body>
+  <div class="hud">拖拽旋转，滚轮缩放（OrbitControls 已启用）。</div>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+    import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
+
+    // 简易 clamp 工具函数
+    const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+
+    const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio||1));
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+    // 确保 WebGL 画布位于烟花覆盖层之上（爱心台在前，烟花在后）
+    renderer.domElement.style.position = 'fixed';
+    renderer.domElement.style.left = '0';
+    renderer.domElement.style.top = '0';
+    renderer.domElement.style.zIndex = '2';
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 2000);
+    camera.position.set(0, 120, 360);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; controls.dampingFactor = 0.06; controls.autoRotate = true; controls.autoRotateSpeed = 0.6;
+    // 暴露给烟花覆盖层：摄像机与遮挡矩形（屏幕投影）
+    window.camera = camera;
+    window.fwMaskRect = null;
+
+    // 光照（微弱环境 + 点光以增强 bloom）
+    scene.add(new THREE.AmbientLight(0x4070a0, 0.25));
+    const glowLight = new THREE.PointLight(0x7bbcff, 2.0, 600, 2.0);
+    glowLight.castShadow = true;
+    glowLight.position.set(0, 60, 120); scene.add(glowLight);
+
+    // 三维星空背景：纯黑背景上点点星光，远层更暗、近层更亮，轻微闪烁
+    const STAR_COUNT = 2200;
+    const starPos   = new Float32Array(STAR_COUNT*3);
+    const starSize  = new Float32Array(STAR_COUNT);
+    const starHue   = new Float32Array(STAR_COUNT);
+    const starPhase = new Float32Array(STAR_COUNT);
+    for (let i=0;i<STAR_COUNT;i++){
+      // 均匀分布在球壳上，避免中心过密
+      const r  = 900 + Math.random()*700;         // 半径 900–1600
+      const th = Math.random()*Math.PI*2;         // 经度
+      const ph = Math.acos(2*Math.random()-1.0);  // 纬度（均匀采样）
+      const x = r * Math.sin(ph) * Math.cos(th);
+      const y = r * Math.cos(ph);
+      const z = r * Math.sin(ph) * Math.sin(th);
+      starPos[i*3+0]=x; starPos[i*3+1]=y; starPos[i*3+2]=z;
+      // 星点大小与颜色：以白色为主，少量偏蓝/偏紫
+      const dens = Math.random();
+      starSize[i] = 1.0 + dens*1.5; // 1–2.5 像素
+      const hPick = Math.random();
+      starHue[i] = (hPick < 0.78) ? (0.0 + Math.random()*0.02) // 白
+                   : (hPick < 0.92 ? (0.60 + Math.random()*0.08) // 蓝偏
+                                   : (0.74 + Math.random()*0.08)); // 紫偏
+      starPhase[i] = Math.random() * Math.PI * 2;
+    }
+    const starGeom = new THREE.BufferGeometry();
+    starGeom.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+    starGeom.setAttribute('aSize', new THREE.BufferAttribute(starSize,1));
+    starGeom.setAttribute('aHue', new THREE.BufferAttribute(starHue,1));
+    starGeom.setAttribute('aOffset', new THREE.BufferAttribute(starPhase,1));
+    // 注意：不要在 uniforms 初始化之前引用它，星空独立维护 uTime，然后在动画循环中同步
+    const starUniforms = { uTime: { value: 0 }, uPerspective: { value: 460.0 } };
+    const starMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: starUniforms,
+      vertexShader: /* glsl */`
+        uniform float uTime; uniform float uPerspective; attribute float aSize; attribute float aHue; attribute float aOffset;
+        varying float vHue; varying float vAlpha; varying float vOffset; varying float vDepth;
+        void main(){
+          vec3 pos = position;
+          // 轻微抖动，避免完全静止
+          pos.x += 0.12*sin(uTime*0.7 + aOffset);
+          pos.y += 0.10*cos(uTime*0.9 + aOffset*1.3);
+          vHue = aHue; vOffset = aOffset; vDepth = abs(pos.z);
+          vec4 mv = modelViewMatrix * vec4(pos,1.0);
+          gl_Position = projectionMatrix * mv;
+          float dist = -mv.z;
+          gl_PointSize = aSize * (uPerspective / max(80.0, dist));
+          vAlpha = 0.65;
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float; uniform float uTime; varying float vHue; varying float vAlpha; varying float vOffset; varying float vDepth;
+        vec3 hueToRgb(float h){
+          if (h > 0.70){ float t = clamp((h - 0.72) / 0.10, 0.0, 1.0); return mix(vec3(0.80,0.78,1.0), vec3(0.60,0.50,0.98), t); }
+          else if (h > 0.50){ float t = clamp((h - 0.58) / 0.10, 0.0, 1.0); return mix(vec3(0.72,0.90,1.0), vec3(0.45,0.65,1.0), t); }
+          else { return vec3(0.93,0.97,1.0); }
+        }
+        void main(){
+          vec2 uv = gl_PointCoord - 0.5; float d = length(uv);
+          float circle = smoothstep(0.50, 0.18, d);
+          float twk = 0.45 + 0.55*sin(uTime*7.5 + vOffset);
+          float dof = 1.0 - 0.50*smoothstep(0.0, 80.0, vDepth); // 远层更暗
+          vec3 color = hueToRgb(vHue) * (0.75 + 0.25*sin(uTime*0.6)) + vec3(0.20*twk);
+          float alpha = circle * vAlpha * twk * dof;
+          if (alpha < 0.02) discard; gl_FragColor = vec4(color, alpha);
+        }
+      `
+    });
+    const stars = new THREE.Points(starGeom, starMat);
+    scene.add(stars);
+
+    // 后处理 Bloom
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    const afterimage = new AfterimagePass(0.88); // 拖影
+    composer.addPass(afterimage);
+    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.8, 0.85, 0.0);
+    composer.addPass(bloom);
+
+    // 心形外框参数（可按需调整）
+    const OUTLINE = {
+      width: 1.0,        // X 方向整体宽度缩放（>1 更宽，<1 更窄）
+      height: 1.0,       // Y 方向整体高度缩放（>1 更高，<1 更矮）
+      xExponent: 1.0,    // X 方向圆润/尖锐（<1 更圆润，>1 更偏尖）
+      yExponent: 1.0,    // Y 方向圆润/尖锐（<1 更圆润，>1 更偏尖，底部更尖）
+      topLobeBoost: 0.0, // 顶部双弧隆起（0..0.5 合理），增大上半部的饱满度
+      topWidthGain: 0.0, // 顶部区域加宽（0..0.5 合理），双弧更分开更宽
+      tipBoost: 0.0      // 底部尖点延伸（0..0.5 合理），底尖更利
+    };
+    const HEART_X_MAX = 16.0; // 经典心形 X 最大幅度近似
+    const HEART_Y_MAX = 17.0; // 经典心形 Y 负向幅度近似（底部尖点）
+    // 心形采样函数（参数化外框）：在经典心形基础上做可控的非线性变形
+    function heartPoint(t){
+      const x0 = 16 * Math.sin(t)**3;
+      const y0 = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+      // 归一化到 [-1,1]
+      let xN = x0 / HEART_X_MAX;
+      let yN = y0 / HEART_Y_MAX;
+      // 非线性圆润/尖锐控制
+      const ex = OUTLINE.xExponent;
+      const ey = OUTLINE.yExponent;
+      xN = Math.sign(xN) * Math.pow(Math.abs(xN), ex);
+      yN = Math.sign(yN) * Math.pow(Math.abs(yN), ey);
+      // 顶部饱满与加宽（仅作用于上半部 yN>0）
+      if (yN > 0.0){
+        yN += OUTLINE.topLobeBoost * (yN*yN); // 上半部隆起
+        const w = Math.min(1.0, Math.max(0.0, (yN - 0.2) / 0.8)); // y 越高加宽越明显
+        xN *= (1.0 + OUTLINE.topWidthGain * w);
+      } else {
+        // 底部尖点延伸（下半部）
+        const w = 1.0 - Math.min(1.0, Math.abs(yN)); // 越靠近尖点权重越大
+        yN *= (1.0 + OUTLINE.tipBoost * (0.5 + 0.5*w));
+      }
+      // 反归一化并应用整体宽高缩放
+      const x = xN * HEART_X_MAX * OUTLINE.width;
+      const y = yN * HEART_Y_MAX * OUTLINE.height;
+      return new THREE.Vector2(x, y);
+    }
+
+    // 体素化心形（三维实心），并从底座粒子持续“补货”向上填充
+    const HEART_COUNT = 4500;     // 心形粒子总数（减少为原来的一半）
+    const START_FILLED = true;    // 是否在开场就直接填满心形（去除最开始的缩放/聚合效果）
+    const BASE_COUNT  = 400;      // 底座粒子数量（再减半：800 → 400）
+    const SCALE       = 9.0 * (3/8);      // 心形尺寸缩放（进一步缩小为原来的 3/8，便于手机端完整可见）
+    const THICKNESS   = 28 * (3/8);       // 心形厚度按同比例缩小
+    const HEART_Y     = 140;      // 心形中心高度
+    // 根据心形高度将底座与爱心拉开：间距设为心形的一半高度
+    const HEART_HEIGHT = 30.0 * SCALE; // 经典心形近似高度差（约 30）
+    const HEART_BOTTOM = HEART_Y - 20.0 - 17.0 * SCALE; // 近似心形底部 y
+    const GAP          = Math.max(80, window.innerHeight * 0.10); // 约占画面高度的 10% 的悬浮间距
+    let BASE_Y         = HEART_BOTTOM - GAP;            // 底座下移
+    const BASE_R      = (140 * (4.0/3.0)) * (3/8); // 底座半径按 3/8 缩小
+    const ATTRACT     = 0.015;    // 上升粒子吸引力到目标
+    const DAMP        = 0.985;    // 速度阻尼
+    const UP_BOOST    = 0.04;     // 向上额外推动
+    const SETTLE_DIST = 2.5;      // 接近目标后定居阈值
+
+    // 尺寸换算（厘米 → 场景单位）：按你的偏好采用 S_CM = 8
+    const S_CM = 8.0;
+
+    // 三维“旋转实体”体积采样：将二维心形绕 y 轴旋转，保证 z 方向厚度与 x 方向宽度一致
+    function sampleHeartVolume(){
+      // 在经典心形曲线上取一点（完整轮廓），其横向值 |x| 作为该高度处的截面半径
+      const t = Math.random() * Math.PI * 2;
+      const hp = heartPoint(t).multiplyScalar(SCALE);
+      const y = hp.y + HEART_Y - 20;
+      const r = Math.abs(hp.x);
+      // 在半径为 r 的圆盘内均匀采样（ρ = r * sqrt(u)），φ 为方位角
+      const u = Math.random();
+      const rho = r * Math.sqrt(u);
+      const phi = Math.random() * Math.PI * 2;
+      const x = rho * Math.cos(phi);
+      const z = rho * Math.sin(phi);
+      return new THREE.Vector3(x, y, z);
+    }
+    function sampleBase(){
+      const ang = Math.random() * Math.PI * 2;
+      const rad = BASE_R * (0.75 + Math.random()*0.25); // 边缘更亮
+      const x = Math.cos(ang) * rad;
+      const z = Math.sin(ang) * rad;
+      const y = BASE_Y + Math.random()*4.0; // 轻微高度起伏
+      return new THREE.Vector3(x, y, z);
+    }
+
+    // 计算心形在屏幕上的投影矩形，用于让烟花仅在背景中出现（避免绘制到爱心台前景区域）
+    function updateFwMaskRect(){
+      // 允许烟花与文字覆盖在爱心表面：禁用前景遮挡矩形
+      window.fwMaskRect = null;
+    }
+
+    // 心形粒子数据（位置、速度、目标、状态、寿命等）
+    const heartPos = new Float32Array(HEART_COUNT*3);
+    const heartVel = new Float32Array(HEART_COUNT*3);
+    const heartTgt = new Float32Array(HEART_COUNT*3);
+    const heartSize = new Float32Array(HEART_COUNT);
+    const heartHue  = new Float32Array(HEART_COUNT);
+    const heartPhase= new Float32Array(HEART_COUNT); // shader 相位
+    const heartDensity = new Float32Array(HEART_COUNT); // 用于中心高光与尺寸偏置
+    const heartState= new Uint8Array(HEART_COUNT);   // 0: rising, 1: settled
+    const heartLife = new Float32Array(HEART_COUNT);
+    const heartMax  = new Float32Array(HEART_COUNT);
+
+    for (let i=0;i<HEART_COUNT;i++){
+      const tgt = sampleHeartVolume();
+      heartTgt[i*3+0]=tgt.x; heartTgt[i*3+1]=tgt.y; heartTgt[i*3+2]=tgt.z;
+      if (START_FILLED){
+        // 开场直接填满心形：位置即目标，状态为已定居，去除最开始从底座聚合上来的“缩放感”
+        heartPos[i*3+0]=tgt.x; heartPos[i*3+1]=tgt.y; heartPos[i*3+2]=tgt.z;
+        heartVel[i*3+0]=0; heartVel[i*3+1]=0; heartVel[i*3+2]=0;
+        heartState[i]=1;
+        heartLife[i]= 4.0 + Math.random()*5.0;
+        heartMax[i] = heartLife[i];
+      } else {
+        // 原逻辑：从底座发射并逐步聚合到心形体积
+        const p0 = sampleBase();
+        heartPos[i*3+0]=p0.x; heartPos[i*3+1]=p0.y; heartPos[i*3+2]=p0.z;
+        heartVel[i*3+0]= (Math.random()-0.5)*0.5;
+        heartVel[i*3+1]= 0.6 + Math.random()*0.6; // 初始向上
+        heartVel[i*3+2]= (Math.random()-0.5)*0.5;
+        heartState[i]=0;
+        heartLife[i]= 4.0 + Math.random()*5.0;
+        heartMax[i] = heartLife[i];
+      }
+      // 根据目标填充比例推断中心密度：近中心粒子稍大更亮
+      const tx = heartTgt[i*3+0], ty=heartTgt[i*3+1];
+      const r2 = Math.sqrt(tx*tx + (ty-HEART_Y+20)*(ty-HEART_Y+20));
+      const density = 1.0 / (1.0 + r2*0.002);
+      heartDensity[i] = density;
+      // 粒子大小 1–3 像素范围（中心略大），更接近图像颗粒感
+      heartSize[i] = Math.min(3.0, Math.max(1.0, 1.0 + density*1.5 + Math.random()*0.6));
+      // 蓝紫色系：蓝 0.58–0.68，紫 0.72–0.82，白用于高光
+      const bandPick = Math.random();
+      if (bandPick < 0.65) heartHue[i] = 0.58 + Math.random()*0.10; // 蓝
+      else if (bandPick < 0.95) heartHue[i] = 0.72 + Math.random()*0.10; // 紫
+      else heartHue[i] = 0.0 + Math.random()*0.02; // 白近似
+      heartPhase[i]= Math.random()*Math.PI*2;
+    }
+
+    // 底座粒子（环形涟漪/旋涡）
+    const basePos = new Float32Array(BASE_COUNT*3);
+    const baseSize= new Float32Array(BASE_COUNT);
+    const baseHue = new Float32Array(BASE_COUNT);
+    const baseAng = new Float32Array(BASE_COUNT);
+    const baseRad = new Float32Array(BASE_COUNT);
+    const baseYOffset = new Float32Array(BASE_COUNT); // 使底座形成上下层，不同高度
+    const baseDensity = new Float32Array(BASE_COUNT); // 用于分层明暗（传给着色器的 aDensity）
+    const LAYER_DEPTH = 24.0; // 向下扩展的最大深度（更明显）
+    for (let i=0;i<BASE_COUNT;i++){
+      const ang = Math.random()*Math.PI*2; baseAng[i]=ang;
+      const rad = BASE_R * (0.6 + Math.random()*0.4); baseRad[i]=rad;
+      const downRate = 0.65; // 有更多粒子向下扩展（层次更明显）
+      const yOff = (Math.random() < downRate) ? -(3.0 + Math.random()*LAYER_DEPTH) : (Math.random()*3.0);
+      baseYOffset[i] = yOff;
+      basePos[i*3+0]=Math.cos(ang)*rad;
+      basePos[i*3+1]=BASE_Y + yOff;
+      basePos[i*3+2]=Math.sin(ang)*rad;
+      // 分层大小与明暗：上层更亮更大，低层更暗更小
+      let dens;
+      if (yOff >= 0.0){
+        dens = 0.90 + Math.random()*0.10; // 上层更亮
+        baseSize[i] = (2.1 + Math.random()*2.2) * (0.85 + dens*0.45);
+      } else {
+        const depthNorm = Math.min(1.0, Math.abs(yOff) / (LAYER_DEPTH+3.0));
+        dens = 0.30 + 0.35 * (1.0 - depthNorm) + Math.random()*0.10; // 越深越暗
+        baseSize[i] = (2.1 + Math.random()*2.0) * (0.70 + dens*0.35);
+      }
+      baseDensity[i] = dens;
+      baseHue[i]  = 0.58 + Math.random()*0.10; // 蓝色为主
+    }
+
+    // 心形几何与材质（着色器点精灵）
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(heartPos, 3));
+    geom.setAttribute('aSize', new THREE.BufferAttribute(heartSize, 1));
+    geom.setAttribute('aOffset', new THREE.BufferAttribute(heartPhase, 1));
+    geom.setAttribute('aHue', new THREE.BufferAttribute(heartHue, 1));
+    geom.setAttribute('aDensity', new THREE.BufferAttribute(heartDensity, 1));
+
+    const uniforms = {
+      uTime: { value: 0 },
+      uBreathAmp: { value: 2.0 }, // 心形缓慢呼吸（更小幅度）
+      uDriftAmp: { value: 0.28 }, // 心形内的缓慢横向漂移幅度
+      // 心跳脉冲参数（同步跳动）
+      uBeatAmp: { value: 4.0 },
+      uBeatFreq: { value: 1.6 }, // 次/秒，约 96 bpm
+      // 颜色：蓝紫梯度从 (138, 43, 226) 到 (0, 191, 255)
+      uPurple: { value: new THREE.Color(138/255, 43/255, 226/255) },
+      uBlue:   { value: new THREE.Color(0/255, 191/255, 255/255) },
+      uBaseBlue: { value: new THREE.Color('#7bbcff') },
+      uBaseWhite: { value: new THREE.Color('#e8f3ff') },
+      uBasePurple: { value: new THREE.Color('#b0a1ff') },
+      uHighlightGain: { value: 1.25 },
+      uPerspective: { value: 420.0 },
+      // 简化光照方向（从上方斜向照射）：用于增强正面亮度
+      uLightDir: { value: new THREE.Vector3(0.0, 0.85, 0.55).normalize() },
+      uFlickerAmp: { value: 0.35 }, // 闪烁强度
+      // 全局扩散/淡出控制：0 开始扩散前，1 完全扩散并淡出
+      uDisperse: { value: 0.0 }
+    };
+
+    const heartMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      uniforms,
+      vertexShader: /* glsl */`
+        uniform float uTime; uniform float uBreathAmp; uniform float uDriftAmp; uniform float uBeatAmp; uniform float uBeatFreq; uniform float uPerspective; uniform vec3 uLightDir;
+        attribute float aSize; attribute float aOffset; attribute float aHue; attribute float aDensity;
+        varying float vHue; varying float vMix; varying float vAlpha; varying float vOffset; varying float vDensity; varying float vLight; varying float vGrad; varying float vDepth;
+        void main(){
+          vec3 pos = position;
+          // 简化法线：指向中心的反方向
+          vec3 n = normalize(pos - vec3(0.0, 40.0, 0.0));
+          float wobble = sin(uTime*1.5 + aOffset) * (uBreathAmp*0.35);
+          pos += n * wobble;          // 呼吸起伏
+          // 心跳脉冲（全局同相）：更有节奏的“砰—砰”
+          float s = 0.5 + 0.5 * sin(uTime * (2.0*uBeatFreq));
+          float beatPulse = pow(s, 5.0); // 尖锐一些，像心跳
+          pos += n * (uBeatAmp * 0.25 * beatPulse);
+          pos.x += sin(uTime*0.7 + aOffset) * uDriftAmp; // 轻微漂移（受控）
+          pos.z += cos(uTime*0.9 + aOffset) * uDriftAmp;
+          // 光照项：正面更亮、背面略暗
+          vLight = clamp(dot(normalize(-n), normalize(uLightDir))*0.6 + 0.6, 0.35, 1.2);
+          // 竖直方向颜色梯度（从下到上：紫 -> 蓝）
+          vGrad = clamp((pos.y -  (40.0)) / 160.0, 0.0, 1.0);
+          // 深度用于景深（z 越远，透明度略降）
+          vDepth = abs(pos.z);
+          vHue = aHue;
+          vMix = 0.65 + 0.35 * sin(uTime*3.0 + aOffset); // 蓝白混合权重（闪烁）
+          vAlpha = 0.7 + 0.3 * sin(uTime*2.2 + aOffset);
+          vOffset = aOffset;
+          vDensity = aDensity;
+          vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+          gl_Position = projectionMatrix * mv;
+          float dist = -mv.z;
+          gl_PointSize = aSize * (uPerspective / max(60.0, dist));
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        uniform vec3 uBaseBlue; uniform vec3 uBaseWhite; uniform vec3 uBasePurple; uniform vec3 uPurple; uniform vec3 uBlue; uniform float uTime; uniform float uHighlightGain; uniform float uFlickerAmp; uniform float uDisperse;
+        varying float vHue; varying float vMix; varying float vAlpha; varying float vOffset; varying float vDensity; varying float vLight; varying float vGrad; varying float vDepth;
+        // 蓝/紫/白近似转换
+        vec3 hueToRgb(float h){
+          if (h > 0.70){ // 紫色区间 0.72–0.82
+            float t = clamp((h - 0.72) / 0.10, 0.0, 1.0);
+            return mix(vec3(0.75,0.72,1.0), vec3(0.55,0.45,0.95), t);
+          } else if (h > 0.50){ // 蓝色区间 0.58–0.68
+            float t = clamp((h - 0.58) / 0.10, 0.0, 1.0);
+            return mix(vec3(0.6,0.85,1.0), vec3(0.35,0.55,1.0), t);
+          } else { // 白色近似
+            return vec3(0.93,0.97,1.0);
+          }
+        }
+        void main(){
+          vec2 uv = gl_PointCoord - 0.5;
+          float d = length(uv);
+          float circle = smoothstep(0.5, 0.22, d); // 柔边点精灵
+          // 星芒闪烁（轻微）：
+          float rays = abs(uv.x*uv.y);
+          float sparkle = 0.35 * pow(1.0 - smoothstep(0.0, 0.25, d), 3.0) * (0.5 + 0.5*sin(uTime*9.0 + vOffset));
+          vec3 gradC = mix(uPurple, uBlue, vGrad); // 位置梯度色（紫->蓝）
+          vec3 hueC = hueToRgb(vHue);              // 随机色带微调
+          // 中心区增加高光（根据 vDensity）
+          float highlight = pow(vDensity, 1.2) * uHighlightGain;
+          vec3 color = mix(gradC, hueC, 0.35) * vLight + vec3(sparkle) + vec3(highlight*0.28);
+          // 景深：随 z 深度略降透明度，并加入闪烁项
+          float dof = 1.0 - 0.35 * smoothstep(0.0, 14.0, vDepth);
+          float alpha = circle * vAlpha * (0.80 + 0.20*highlight) * dof * (0.75 + uFlickerAmp * (0.5 + 0.5*sin(uTime*6.0 + vOffset)));
+          // 扩散淡出：uDisperse 从 0 到 1，逐步减小透明度
+          alpha *= (1.0 - uDisperse);
+          if (alpha < 0.02) discard;
+          gl_FragColor = vec4(color, alpha);
+        }
+      `
+    });
+
+    const heartPoints = new THREE.Points(geom, heartMat);
+    scene.add(heartPoints);
+
+    // 底座点精灵
+    const baseGeom = new THREE.BufferGeometry();
+    baseGeom.setAttribute('position', new THREE.BufferAttribute(basePos, 3));
+    baseGeom.setAttribute('aSize', new THREE.BufferAttribute(baseSize, 1));
+    baseGeom.setAttribute('aOffset', new THREE.BufferAttribute(baseAng, 1));
+    baseGeom.setAttribute('aHue', new THREE.BufferAttribute(baseHue, 1));
+    baseGeom.setAttribute('aDensity', new THREE.BufferAttribute(baseDensity, 1));
+    const baseMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: {
+        uTime: uniforms.uTime,
+        uBreathAmp: { value: 0.0 },
+        uDriftAmp: { value: 0.0 }, // 底盘不做横向漂移，保证各方向观感一致
+        uBaseBlue: uniforms.uBaseBlue,
+        uBaseWhite: uniforms.uBaseWhite,
+        uBasePurple: uniforms.uBasePurple,
+        uPurple: uniforms.uPurple,
+        uBlue: uniforms.uBlue,
+        uLightDir: uniforms.uLightDir,
+        uFlickerAmp: uniforms.uFlickerAmp,
+        uDisperse: uniforms.uDisperse,
+        uHighlightGain: { value: 0.9 },
+        uPerspective: { value: 460.0 }
+      },
+      vertexShader: heartMat.vertexShader, fragmentShader: heartMat.fragmentShader
+    });
+    const basePoints = new THREE.Points(baseGeom, baseMat);
+    basePoints.position.set(0, 0, 0); scene.add(basePoints);
+
+    // 地面光环（着色器平面）
+    const portalUniforms = {
+      uTime: { value: 0 },
+      uColorA: { value: new THREE.Color('#7bbcff') },
+      uColorB: { value: new THREE.Color('#bfe3ff') }
+    };
+    const portalMat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite:false, blending:THREE.AdditiveBlending, side:THREE.DoubleSide,
+      uniforms: portalUniforms,
+      vertexShader: /* glsl */`
+        varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float; varying vec2 vUv; uniform float uTime; uniform vec3 uColorA; uniform vec3 uColorB;
+        void main(){
+          vec2 p = vUv*2.0-1.0;
+          float r = length(p);
+          float theta = atan(p.y, p.x);
+          // 多层光晕（核心 + 主环 + 次环）
+          float core = exp(-8.5*r) * (0.85 + 0.15*sin(uTime*3.0));
+          float ring1 = exp(-6.0*abs(r-0.52)) * (0.70 + 0.30*sin(uTime*2.0 + r*12.0));
+          float ring2 = exp(-8.0*abs(r-0.72)) * (0.45 + 0.25*sin(uTime*1.4 - r*10.0));
+          // 边缘动态光带（沿角度移动的亮带）
+          float bands = 0.35 * sin(theta*6.0 + uTime*3.0) * exp(-2.0*abs(r-0.78));
+          // 轻微涟漪/旋涡
+          float swirl = 0.30 * sin(10.0*p.x + uTime*2.2) * sin(10.0*p.y - uTime*1.7) * exp(-3.5*r);
+          vec3 col = mix(uColorA, uColorB, 0.5 + 0.5*sin(uTime*0.8));
+          vec3 color = col * (core + ring1 + ring2) + vec3(swirl + bands);
+          float alpha = clamp(core + ring1 + ring2 + swirl + bands, 0.0, 1.0);
+          if (alpha < 0.02) discard; gl_FragColor = vec4(color, alpha);
+        }
+      `
+    });
+    const portal = new THREE.Mesh(new THREE.PlaneGeometry(320, 320, 1, 1), portalMat);
+    portal.position.set(0, BASE_Y, 0); portal.rotation.x = -Math.PI/2; scene.add(portal);
+    // 根据你的要求，底座改为“纯粒子流”呈现，此处将原平面光环隐藏（保留代码以便回退或对比）
+    portal.visible = false;
+
+    // 纯粒子流的底座光环：多圈粒子带（环形+涟漪+轻微旋涡），与底座粒子一致采用点精灵
+    const AURA_COUNT = 4200;
+    const auraPos   = new Float32Array(AURA_COUNT*3); // 不直接使用（顶点计算位置），预留占位
+    const auraSize  = new Float32Array(AURA_COUNT);
+    const auraHue   = new Float32Array(AURA_COUNT);
+    const auraOffset= new Float32Array(AURA_COUNT);
+    const auraAng   = new Float32Array(AURA_COUNT);
+    const auraRad   = new Float32Array(AURA_COUNT);
+    const auraBand  = new Float32Array(AURA_COUNT); // 0/1/2 三层环带
+    const auraDensity = new Float32Array(AURA_COUNT);
+    // 设定三层环带的半径范围，靠外更亮更大，靠内更柔
+    const R_IN = BASE_R * 0.62;
+    const R_MD = BASE_R * 0.78;
+    const R_OUT= BASE_R * 0.95;
+    for (let i=0;i<AURA_COUNT;i++){
+      const bandPick = Math.random();
+      let band = 0; let r0 = R_IN, r1 = R_MD; // 内层
+      // 增强内圈比例，使底座内圈粒子更明显
+      if (bandPick < 0.60){ band = 0; r0 = R_IN; r1 = R_MD; }
+      else if (bandPick < 0.85){ band = 1; r0 = R_MD*0.97; r1 = R_OUT*0.98; }
+      else { band = 2; r0 = R_OUT*0.94; r1 = R_OUT*1.02; }
+      const ang = Math.random() * Math.PI * 2;
+      const rad = r0 + Math.random()*(r1 - r0);
+      auraAng[i] = ang; auraRad[i] = rad; auraBand[i] = band;
+      auraPos[i*3+0]=0; auraPos[i*3+1]=0; auraPos[i*3+2]=0; // 顶点着色器计算实际位置
+      // 大小与明暗：外圈更亮更大，内圈更柔更小
+      const densBase = band===2 ? (0.85 + Math.random()*0.12)
+                        : band===1 ? (0.70 + Math.random()*0.20)
+                                   : (0.50 + Math.random()*0.25);
+      auraDensity[i] = densBase;
+      auraSize[i] = 1.1 + (band===2 ? 1.0 : band===1 ? 0.7 : 0.4) + Math.random()*0.7;
+      // 色带：以蓝白为主，间或少量紫，保持与整体一致的蓝白能量感
+      const hPick = Math.random();
+      auraHue[i] = (hPick < 0.75) ? (0.58 + Math.random()*0.10) : (hPick < 0.95 ? (0.0 + Math.random()*0.02) : (0.72 + Math.random()*0.10));
+      auraOffset[i] = Math.random() * Math.PI * 2;
+    }
+    const auraGeom = new THREE.BufferGeometry();
+    auraGeom.setAttribute('position', new THREE.BufferAttribute(auraPos, 3));
+    auraGeom.setAttribute('aSize', new THREE.BufferAttribute(auraSize, 1));
+    auraGeom.setAttribute('aHue', new THREE.BufferAttribute(auraHue, 1));
+    auraGeom.setAttribute('aOffset', new THREE.BufferAttribute(auraOffset, 1));
+    auraGeom.setAttribute('aAng', new THREE.BufferAttribute(auraAng, 1));
+    auraGeom.setAttribute('aRadius', new THREE.BufferAttribute(auraRad, 1));
+    auraGeom.setAttribute('aBand', new THREE.BufferAttribute(auraBand, 1));
+    auraGeom.setAttribute('aDensity', new THREE.BufferAttribute(auraDensity, 1));
+    const auraUniforms = {
+      uTime: uniforms.uTime,
+      uBaseY: { value: BASE_Y },
+      uPerspective: { value: 460.0 },
+      uBaseBlue: uniforms.uBaseBlue,
+      uBaseWhite: uniforms.uBaseWhite,
+      uBasePurple: uniforms.uBasePurple,
+      uDisperse: uniforms.uDisperse
+    };
+    const auraMat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: auraUniforms,
+      vertexShader: /* glsl */`
+        uniform float uTime; uniform float uPerspective; uniform float uBaseY; uniform float uDisperse;
+        attribute float aSize; attribute float aHue; attribute float aOffset; attribute float aAng; attribute float aRadius; attribute float aBand; attribute float aDensity;
+        varying float vHue; varying float vAlpha; varying float vDensity;
+        void main(){
+          float theta = aAng + uTime * (0.50 + 0.14*aBand) + 0.12*sin(uTime*2.0 + aOffset);
+          float rad = aRadius + 10.0*sin(uTime*1.3 + aOffset + aBand*0.7);
+          // 扩散：半径随 uDisperse 增大（更慢）
+          rad *= (1.0 + 1.4*uDisperse);
+          vec3 pos = vec3(cos(theta) * rad, uBaseY + 0.8*sin(uTime*0.8 + aOffset) + 0.6*sin(uTime*1.6 + aBand), sin(theta) * rad);
+          // 轻微向外/向内的呼吸，让外圈更显能量流动
+          pos.x += 0.6 * sin(uTime*1.1 + aOffset) * (aBand*0.8);
+          pos.z += 0.6 * cos(uTime*1.0 + aOffset) * (aBand*0.8);
+          vHue = aHue;
+          vDensity = aDensity;
+          vAlpha = 0.65 + 0.35 * aDensity;
+          vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+          gl_Position = projectionMatrix * mv;
+          float dist = -mv.z;
+          gl_PointSize = aSize * (uPerspective / max(60.0, dist));
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float; uniform float uTime; uniform vec3 uBaseBlue; uniform vec3 uBaseWhite; uniform vec3 uBasePurple; uniform float uDisperse; varying float vHue; varying float vAlpha; varying float vDensity;
+        vec3 hueToRgb(float h){
+          if (h > 0.70){
+            float t = clamp((h - 0.72) / 0.10, 0.0, 1.0);
+            return mix(vec3(0.75,0.72,1.0), vec3(0.55,0.45,0.95), t);
+          } else if (h > 0.50){
+            float t = clamp((h - 0.58) / 0.10, 0.0, 1.0);
+            return mix(vec3(0.6,0.85,1.0), vec3(0.35,0.55,1.0), t);
+          } else {
+            return vec3(0.93,0.97,1.0);
+          }
+        }
+        void main(){
+          vec2 uv = gl_PointCoord - 0.5;
+          float d = length(uv);
+          float circle = smoothstep(0.48, 0.22, d);
+          float sparkle = 0.22 * pow(1.0 - smoothstep(0.0, 0.25, d), 3.0) * (0.5 + 0.5*sin(uTime*8.5));
+          vec3 baseCol = mix(uBaseBlue, mix(uBasePurple, uBaseWhite, 0.45), 0.6 + 0.4*sin(uTime*0.9));
+          vec3 hueC = hueToRgb(vHue);
+          vec3 color = mix(baseCol, hueC, 0.35) + vec3(sparkle) + vec3(vDensity*0.20);
+          float alpha = circle * vAlpha * (0.80 + 0.20*vDensity);
+          alpha *= (1.0 - uDisperse);
+          if (alpha < 0.02) discard; gl_FragColor = vec4(color, alpha);
+        }
+      `
+    });
+    const baseAura = new THREE.Points(auraGeom, auraMat);
+    scene.add(baseAura);
+
+    // 底座与爱心底部之间的“流动粒子层”（Bridge Layer）：在两者之间上下往复流动
+    const BRIDGE_COUNT = 2000;
+    const bridgePos    = new Float32Array(BRIDGE_COUNT*3);
+    const bridgeAng    = new Float32Array(BRIDGE_COUNT);
+    const bridgeRad    = new Float32Array(BRIDGE_COUNT);
+    const bridgeProg   = new Float32Array(BRIDGE_COUNT); // 0..1 位置进度（0:底座，1:心底）
+    const bridgeDir    = new Int8Array(BRIDGE_COUNT);    // 1 向上，-1 向下
+    const bridgeSize   = new Float32Array(BRIDGE_COUNT);
+    const bridgeHue    = new Float32Array(BRIDGE_COUNT);
+    const bridgePhase  = new Float32Array(BRIDGE_COUNT);
+    const bridgeDensity= new Float32Array(BRIDGE_COUNT);
+    const bridgeSpinDir= new Int8Array(BRIDGE_COUNT);    // 交替旋转方向：蓝顺时针(+1)、紫逆时针(-1)
+    const BRIDGE_UP_SPEED = 0.28;  // 上升基础速度
+    const BRIDGE_DOWN_SPEED = 0.24;// 下降基础速度
+    const BRIDGE_SWIRL = 0.75;     // 横向微旋涡强度
+    const corridorY = Math.max(BASE_Y + 2.0, HEART_BOTTOM - 10.0); // 上边界略低于心形底部
+    const spanY = Math.max(6.0, corridorY - BASE_Y - 2.0);
+    for (let i=0;i<BRIDGE_COUNT;i++){
+      const ang = Math.random() * Math.PI * 2;
+      const rad = R_IN * (0.92 + Math.random()*0.18); // 贴近内圈起始
+      bridgeAng[i] = ang + Math.random()*0.5;
+      bridgeRad[i] = rad;
+      bridgeProg[i]= Math.random();
+      bridgeDir[i] = Math.random()<0.5 ? 1 : -1;
+      bridgePos[i*3+0]=Math.cos(ang)*rad;
+      bridgePos[i*3+1]=BASE_Y + bridgeProg[i]*spanY;
+      bridgePos[i*3+2]=Math.sin(ang)*rad;
+      // 尺寸与亮度：中性偏亮，随进度略变化（靠上略偏蓝白、靠下略偏紫蓝）
+      const dens = 0.65 + Math.random()*0.25; bridgeDensity[i]=dens;
+      bridgeSize[i] = 1.2 + dens*1.2 + Math.random()*0.6;
+      // 增加蓝色与紫色的交替：均衡分配颜色，并根据颜色设定旋转方向
+      if (Math.random() < 0.5){
+        bridgeHue[i] = 0.58 + Math.random()*0.10; // 蓝色带
+        bridgeSpinDir[i] = 1; // 顺时针
+      } else {
+        bridgeHue[i] = 0.72 + Math.random()*0.10; // 紫色带
+        bridgeSpinDir[i] = -1; // 逆时针
+      }
+      bridgePhase[i] = Math.random() * Math.PI * 2;
+    }
+    const bridgeGeom = new THREE.BufferGeometry();
+    bridgeGeom.setAttribute('position', new THREE.BufferAttribute(bridgePos,3));
+    bridgeGeom.setAttribute('aSize', new THREE.BufferAttribute(bridgeSize,1));
+    bridgeGeom.setAttribute('aOffset', new THREE.BufferAttribute(bridgePhase,1));
+    bridgeGeom.setAttribute('aHue', new THREE.BufferAttribute(bridgeHue,1));
+    bridgeGeom.setAttribute('aDensity', new THREE.BufferAttribute(bridgeDensity,1));
+    const bridgeMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: { uTime: uniforms.uTime, uBreathAmp:{value:0.0}, uDriftAmp:{value:0.0}, uBaseBlue:uniforms.uBaseBlue, uBaseWhite:uniforms.uBaseWhite, uBasePurple:uniforms.uBasePurple, uHighlightGain:{value:1.0}, uPerspective:{value:460.0}, uPurple:uniforms.uPurple, uBlue:uniforms.uBlue, uLightDir:uniforms.uLightDir, uFlickerAmp:uniforms.uFlickerAmp },
+      vertexShader: heartMat.vertexShader, fragmentShader: heartMat.fragmentShader
+    });
+    const bridgePoints = new THREE.Points(bridgeGeom, bridgeMat);
+    scene.add(bridgePoints);
+
+    // （删除）原“环间流动层”（River Layer）已移除，以保证中间位置不出现最大的环形粒子圈
+
+    // 心形“尾巴”与内外圈之间的“尾部流动层”（Tail Layer）：围绕心形底部空余区域的螺旋/径向流
+    const TAIL_COUNT = 1400;
+    const tailPos    = new Float32Array(TAIL_COUNT*3);
+    const tailAng    = new Float32Array(TAIL_COUNT);
+    const tailProg   = new Float32Array(TAIL_COUNT); // 0..1 从尾部向外扩散的进度
+    const tailDir    = new Int8Array(TAIL_COUNT);    // 1 向外，-1 向内
+    const tailTgtBand= new Int8Array(TAIL_COUNT);    // 0:目标到内圈, 1:目标到外圈
+    const tailSize   = new Float32Array(TAIL_COUNT);
+    const tailHue    = new Float32Array(TAIL_COUNT);
+    const tailPhase  = new Float32Array(TAIL_COUNT);
+    const tailDensity= new Float32Array(TAIL_COUNT);
+    const TAIL_TANG_SPEED = 0.85;  // 旋涡转速略强
+    const TAIL_RAD_SPEED  = 0.50;  // 向外/向内扩散速度
+    const TAIL_Y   = Math.min(HEART_BOTTOM + 6.0, HEART_Y - 24.0); // 心形尾部附近的参考高度
+    const TAIL_R0  = BASE_R * 0.28; // 尾部附近初始半径（靠近中心）
+    for (let i=0;i<TAIL_COUNT;i++){
+      const ang = Math.random() * Math.PI * 2;
+      tailAng[i] = ang + Math.random()*0.6;
+      tailProg[i]= Math.random();
+      tailDir[i] = Math.random()<0.5 ? 1 : -1;
+      tailTgtBand[i] = Math.random()<0.55 ? 0 : 1; // 稍偏向内圈
+      const tgtR = tailTgtBand[i]===0 ? R_IN : R_OUT;
+      const rad = TAIL_R0 + (tgtR - TAIL_R0) * tailProg[i];
+      tailPos[i*3+0]=Math.cos(ang)*rad;
+      tailPos[i*3+1]=TAIL_Y + Math.sin(ang*1.8)*1.2;
+      tailPos[i*3+2]=Math.sin(ang)*rad;
+      const dens = 0.68 + Math.random()*0.25; tailDensity[i]=dens;
+      tailSize[i] = 1.1 + dens*1.1 + Math.random()*0.6;
+      const hPick = Math.random();
+      tailHue[i] = (hPick < 0.75) ? (0.58 + Math.random()*0.10) : (hPick < 0.95 ? (0.0 + Math.random()*0.02) : (0.72 + Math.random()*0.10));
+      tailPhase[i] = Math.random() * Math.PI * 2;
+    }
+    const tailGeom = new THREE.BufferGeometry();
+    tailGeom.setAttribute('position', new THREE.BufferAttribute(tailPos,3));
+    tailGeom.setAttribute('aSize', new THREE.BufferAttribute(tailSize,1));
+    tailGeom.setAttribute('aOffset', new THREE.BufferAttribute(tailPhase,1));
+    tailGeom.setAttribute('aHue', new THREE.BufferAttribute(tailHue,1));
+    tailGeom.setAttribute('aDensity', new THREE.BufferAttribute(tailDensity,1));
+    const tailMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: { uTime: uniforms.uTime, uBreathAmp:{value:0.0}, uDriftAmp:{value:0.0}, uBaseBlue:uniforms.uBaseBlue, uBaseWhite:uniforms.uBaseWhite, uBasePurple:uniforms.uBasePurple, uHighlightGain:{value:1.0}, uPerspective:{value:460.0}, uPurple:uniforms.uPurple, uBlue:uniforms.uBlue, uLightDir:uniforms.uLightDir, uFlickerAmp:uniforms.uFlickerAmp },
+      vertexShader: heartMat.vertexShader, fragmentShader: heartMat.fragmentShader
+    });
+    const tailPoints = new THREE.Points(tailGeom, tailMat);
+    scene.add(tailPoints);
+
+    // 圆环与圆环之间的“直接通道流”（River Direct Layer）：沿固定角度的窄通道，直接在内圈与外圈之间来回
+    const RIVD_COUNT = 1600;
+    const rivdPos    = new Float32Array(RIVD_COUNT*3);
+    const rivdAng    = new Float32Array(RIVD_COUNT);
+    const rivdProg   = new Float32Array(RIVD_COUNT); // 0..1 径向进度（0:靠近内圈，1:靠近外圈）
+    const rivdDir    = new Int8Array(RIVD_COUNT);    // 1 向外，-1 向内
+    const rivdSize   = new Float32Array(RIVD_COUNT);
+    const rivdHue    = new Float32Array(RIVD_COUNT);
+    const rivdPhase  = new Float32Array(RIVD_COUNT);
+    const rivdDensity= new Float32Array(RIVD_COUNT);
+    const rivdChanId = new Int8Array(RIVD_COUNT);
+    const CHAN_COUNT = 8; // 8 条方向通道，等间隔分布
+    const chanAngles = new Float32Array(CHAN_COUNT);
+    for (let k=0;k<CHAN_COUNT;k++){ chanAngles[k] = k * (Math.PI*2 / CHAN_COUNT); }
+    const RIVD_TANG_SPEED = 0.35; // 切向较弱，强调径向直连
+    const RIVD_RAD_SPEED  = 0.70; // 径向更快，形成清晰的“直接连通”效果
+    const rivdYBase = BASE_Y + 1.0;
+    for (let i=0;i<RIVD_COUNT;i++){
+      const cid = Math.floor(Math.random()*CHAN_COUNT);
+      rivdChanId[i] = cid;
+      const ang = chanAngles[cid] + (Math.random()-0.5)*0.18; // 在通道角度附近微偏移
+      rivdAng[i] = ang;
+      rivdProg[i]= Math.random();
+      rivdDir[i] = Math.random()<0.5 ? 1 : -1;
+      const rad = R_IN + (R_OUT - R_IN) * rivdProg[i];
+      rivdPos[i*3+0] = Math.cos(ang) * rad;
+      rivdPos[i*3+1] = rivdYBase + Math.sin(ang*2.0)*0.6;
+      rivdPos[i*3+2] = Math.sin(ang) * rad;
+      const dens = 0.62 + Math.random()*0.28; rivdDensity[i]=dens;
+      rivdSize[i] = 1.0 + dens*1.2 + Math.random()*0.6;
+      const hPick = Math.random();
+      rivdHue[i] = (hPick < 0.78) ? (0.58 + Math.random()*0.10) : (hPick < 0.96 ? (0.0 + Math.random()*0.02) : (0.72 + Math.random()*0.10));
+      rivdPhase[i] = Math.random() * Math.PI * 2;
+    }
+    const rivdGeom = new THREE.BufferGeometry();
+    rivdGeom.setAttribute('position', new THREE.BufferAttribute(rivdPos,3));
+    rivdGeom.setAttribute('aSize', new THREE.BufferAttribute(rivdSize,1));
+    rivdGeom.setAttribute('aOffset', new THREE.BufferAttribute(rivdPhase,1));
+    rivdGeom.setAttribute('aHue', new THREE.BufferAttribute(rivdHue,1));
+    rivdGeom.setAttribute('aDensity', new THREE.BufferAttribute(rivdDensity,1));
+    const rivdMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: { uTime: uniforms.uTime, uBreathAmp:{value:0.0}, uDriftAmp:{value:0.0}, uBaseBlue:uniforms.uBaseBlue, uBaseWhite:uniforms.uBaseWhite, uBasePurple:uniforms.uBasePurple, uHighlightGain:{value:0.9}, uPerspective:{value:460.0}, uPurple:uniforms.uPurple, uBlue:uniforms.uBlue, uLightDir:uniforms.uLightDir, uFlickerAmp:uniforms.uFlickerAmp },
+      vertexShader: heartMat.vertexShader, fragmentShader: heartMat.fragmentShader
+    });
+    const rivdPoints = new THREE.Points(rivdGeom, rivdMat);
+    scene.add(rivdPoints);
+
+    // 爱心尾巴尖与内圈之间的“径向直流”（Tail→Inner Layer）：从尾部中心向内圈做径向直接流动
+    const T2I_COUNT = 1300;
+    const t2iPos    = new Float32Array(T2I_COUNT*3);
+    const t2iAng    = new Float32Array(T2I_COUNT);
+    const t2iProg   = new Float32Array(T2I_COUNT); // 0..1 从尾部半径 TAIL_R0 向内圈 R_IN 的进度
+    const t2iDir    = new Int8Array(T2I_COUNT);    // 1 向外（到内圈），-1 向内（回尾部）
+    const t2iSize   = new Float32Array(T2I_COUNT);
+    const t2iHue    = new Float32Array(T2I_COUNT);
+    const t2iPhase  = new Float32Array(T2I_COUNT);
+    const t2iDensity= new Float32Array(T2I_COUNT);
+    const SPOKES = 10; const spokeAng = new Float32Array(SPOKES);
+    for (let s=0;s<SPOKES;s++){ spokeAng[s] = s * (Math.PI*2 / SPOKES); }
+    const T2I_RAD_SPEED = 0.68;  // 径向较快
+    const T2I_TANG_SPEED= 0.28;  // 切向较弱，突出径向直达
+    for (let i=0;i<T2I_COUNT;i++){
+      const sid = Math.floor(Math.random()*SPOKES);
+      const ang = spokeAng[sid] + (Math.random()-0.5)*0.22;
+      t2iAng[i] = ang;
+      t2iProg[i]= Math.random();
+      t2iDir[i] = Math.random()<0.5 ? 1 : -1;
+      const rad = TAIL_R0 + (R_IN - TAIL_R0) * t2iProg[i];
+      t2iPos[i*3+0] = Math.cos(ang) * rad;
+      t2iPos[i*3+1] = TAIL_Y + Math.sin(ang*1.7)*1.0;
+      t2iPos[i*3+2] = Math.sin(ang) * rad;
+      const dens = 0.70 + Math.random()*0.25; t2iDensity[i]=dens;
+      t2iSize[i] = 1.0 + dens*1.1 + Math.random()*0.6;
+      const hPick = Math.random();
+      t2iHue[i] = (hPick < 0.76) ? (0.58 + Math.random()*0.10) : (hPick < 0.95 ? (0.0 + Math.random()*0.02) : (0.72 + Math.random()*0.10));
+      t2iPhase[i] = Math.random() * Math.PI * 2;
+    }
+    const t2iGeom = new THREE.BufferGeometry();
+    t2iGeom.setAttribute('position', new THREE.BufferAttribute(t2iPos,3));
+    t2iGeom.setAttribute('aSize', new THREE.BufferAttribute(t2iSize,1));
+    t2iGeom.setAttribute('aOffset', new THREE.BufferAttribute(t2iPhase,1));
+    t2iGeom.setAttribute('aHue', new THREE.BufferAttribute(t2iHue,1));
+    t2iGeom.setAttribute('aDensity', new THREE.BufferAttribute(t2iDensity,1));
+    const t2iMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: { uTime: uniforms.uTime, uBreathAmp:{value:0.0}, uDriftAmp:{value:0.0}, uBaseBlue:uniforms.uBaseBlue, uBaseWhite:uniforms.uBaseWhite, uBasePurple:uniforms.uBasePurple, uHighlightGain:{value:1.0}, uPerspective:{value:460.0}, uPurple:uniforms.uPurple, uBlue:uniforms.uBlue, uLightDir:uniforms.uLightDir, uFlickerAmp:uniforms.uFlickerAmp },
+      vertexShader: heartMat.vertexShader, fragmentShader: heartMat.fragmentShader
+    });
+    const t2iPoints = new THREE.Points(t2iGeom, t2iMat);
+    scene.add(t2iPoints);
+
+    // 上下圆环之间的“垂直通道流”（Stack Layer）：在下层圆环（BASE_Y）与上层圆环（UPPER_RING_Y）之间作不规整的错落往返
+    const UPPER_RING_Y = Math.min(HEART_BOTTOM - 6.0, BASE_Y + Math.max(10.0, GAP*0.55));
+    const STACK_COUNT = 1800;
+    const stackPos    = new Float32Array(STACK_COUNT*3);
+    const stackAng    = new Float32Array(STACK_COUNT);
+    const stackRad    = new Float32Array(STACK_COUNT);
+    const stackProg   = new Float32Array(STACK_COUNT); // 0..1 从下环到上环的垂直进度
+    const stackDir    = new Int8Array(STACK_COUNT);    // 1 向上，-1 向下
+    const stackSize   = new Float32Array(STACK_COUNT);
+    const stackHue    = new Float32Array(STACK_COUNT);
+    const stackPhase  = new Float32Array(STACK_COUNT);
+    const stackDensity= new Float32Array(STACK_COUNT);
+    // 每粒子独立速度与跨度，去除固定通道，增强凌乱感
+    const stackUpSpd  = new Float32Array(STACK_COUNT);
+    const stackDnSpd  = new Float32Array(STACK_COUNT);
+    const stackTangSpd= new Float32Array(STACK_COUNT);
+    const stackSpanVar= new Float32Array(STACK_COUNT);
+    const stackRadJit = new Float32Array(STACK_COUNT);
+    const stackYOff   = new Float32Array(STACK_COUNT);
+    for (let i=0;i<STACK_COUNT;i++){
+      const ang = Math.random()*Math.PI*2 + (Math.random()-0.5)*0.30; // 完全随机角度，少量扰动
+      const rad = R_IN + (R_OUT - R_IN) * (0.15 + Math.random()*0.70); // 落在内外圈之间
+      stackAng[i] = ang; stackRad[i] = rad;
+      stackProg[i]= Math.random();
+      stackDir[i] = Math.random()<0.5 ? 1 : -1;
+      stackUpSpd[i]   = 0.30 + Math.random()*0.30;   // 0.30..0.60
+      stackDnSpd[i]   = 0.26 + Math.random()*0.20;   // 0.26..0.46
+      stackTangSpd[i] = 0.12 + Math.random()*0.23;   // 0.12..0.35
+      stackSpanVar[i] = 0.75 + Math.random()*0.50;   // 0.75..1.25（高度跨度因子）
+      stackRadJit[i]  = 0.10 + Math.random()*0.60;   // 半径抖动强度
+      stackYOff[i]    = (Math.random()-0.5) * 1.8;   // 高度偏移打散
+      stackPos[i*3+0]=Math.cos(ang)*rad;
+      stackPos[i*3+1]=BASE_Y + stackProg[i]*(UPPER_RING_Y - BASE_Y)*stackSpanVar[i] + stackYOff[i];
+      stackPos[i*3+2]=Math.sin(ang)*rad;
+      const dens = 0.62 + Math.random()*0.28; stackDensity[i]=dens;
+      stackSize[i] = 1.0 + dens*1.2 + Math.random()*0.6;
+      const hPick = Math.random();
+      stackHue[i] = (hPick < 0.78) ? (0.58 + Math.random()*0.10) : (hPick < 0.96 ? (0.0 + Math.random()*0.02) : (0.72 + Math.random()*0.10));
+      stackPhase[i] = Math.random() * Math.PI * 2;
+    }
+    const stackGeom = new THREE.BufferGeometry();
+    stackGeom.setAttribute('position', new THREE.BufferAttribute(stackPos,3));
+    stackGeom.setAttribute('aSize', new THREE.BufferAttribute(stackSize,1));
+    stackGeom.setAttribute('aOffset', new THREE.BufferAttribute(stackPhase,1));
+    stackGeom.setAttribute('aHue', new THREE.BufferAttribute(stackHue,1));
+    stackGeom.setAttribute('aDensity', new THREE.BufferAttribute(stackDensity,1));
+    const stackMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: { uTime: uniforms.uTime, uBreathAmp:{value:0.0}, uDriftAmp:{value:0.0}, uBaseBlue:uniforms.uBaseBlue, uBaseWhite:uniforms.uBaseWhite, uBasePurple:uniforms.uBasePurple, uHighlightGain:{value:0.95}, uPerspective:{value:460.0}, uPurple:uniforms.uPurple, uBlue:uniforms.uBlue, uLightDir:uniforms.uLightDir, uFlickerAmp:uniforms.uFlickerAmp },
+      vertexShader: heartMat.vertexShader, fragmentShader: heartMat.fragmentShader
+    });
+    const stackPoints = new THREE.Points(stackGeom, stackMat);
+    scene.add(stackPoints);
+
+    // 爱心尾巴尖尖 → 下层内圈的“垂直直达流”（Tail Vertical Layer）：不那么规整，旋转着降落/升起
+    const TV_COUNT = 1200;
+    const tvPos    = new Float32Array(TV_COUNT*3);
+    const tvAng    = new Float32Array(TV_COUNT);
+    const tvRad    = new Float32Array(TV_COUNT);
+    const tvProg   = new Float32Array(TV_COUNT); // 0..1 从尾部到内圈的进度（垂直为主）
+    const tvDir    = new Int8Array(TV_COUNT);    // 1 向上，-1 向下
+    const tvSize   = new Float32Array(TV_COUNT);
+    const tvHue    = new Float32Array(TV_COUNT);
+    const tvPhase  = new Float32Array(TV_COUNT);
+    const tvDensity= new Float32Array(TV_COUNT);
+    const tvUpSpd  = new Float32Array(TV_COUNT);
+    const tvDnSpd  = new Float32Array(TV_COUNT);
+    const tvTangSpd= new Float32Array(TV_COUNT);
+    const tvYOff   = new Float32Array(TV_COUNT);
+    for (let i=0;i<TV_COUNT;i++){
+      const ang = Math.random()*Math.PI*2 + (Math.random()-0.5)*0.35; // 完全随机角度
+      tvAng[i] = ang;
+      tvProg[i]= Math.random();
+      tvDir[i] = Math.random()<0.5 ? 1 : -1; // 升降均可
+      const rad = TAIL_R0 + (R_IN - TAIL_R0) * (0.20 + tvProg[i]*0.80);
+      tvRad[i] = rad;
+      tvUpSpd[i]   = 0.35 + Math.random()*0.30; // 0.35..0.65
+      tvDnSpd[i]   = 0.45 + Math.random()*0.40; // 0.45..0.85
+      tvTangSpd[i] = 0.08 + Math.random()*0.17; // 0.08..0.25
+      tvYOff[i]    = (Math.random()-0.5) * 1.6;
+      tvPos[i*3+0] = Math.cos(ang) * rad;
+      tvPos[i*3+1] = TAIL_Y - tvProg[i] * (TAIL_Y - BASE_Y) + tvYOff[i];
+      tvPos[i*3+2] = Math.sin(ang) * rad;
+      const dens = 0.72 + Math.random()*0.22; tvDensity[i]=dens;
+      tvSize[i] = 1.0 + dens*1.1 + Math.random()*0.6;
+      const hPick = Math.random();
+      tvHue[i] = (hPick < 0.76) ? (0.58 + Math.random()*0.10) : (hPick < 0.95 ? (0.0 + Math.random()*0.02) : (0.72 + Math.random()*0.10));
+      tvPhase[i] = Math.random() * Math.PI * 2;
+    }
+    const tvGeom = new THREE.BufferGeometry();
+    tvGeom.setAttribute('position', new THREE.BufferAttribute(tvPos,3));
+    tvGeom.setAttribute('aSize', new THREE.BufferAttribute(tvSize,1));
+    tvGeom.setAttribute('aOffset', new THREE.BufferAttribute(tvPhase,1));
+    tvGeom.setAttribute('aHue', new THREE.BufferAttribute(tvHue,1));
+    tvGeom.setAttribute('aDensity', new THREE.BufferAttribute(tvDensity,1));
+    const tvMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: { uTime: uniforms.uTime, uBreathAmp:{value:0.0}, uDriftAmp:{value:0.0}, uBaseBlue:uniforms.uBaseBlue, uBaseWhite:uniforms.uBaseWhite, uBasePurple:uniforms.uBasePurple, uHighlightGain:{value:1.0}, uPerspective:{value:460.0}, uPurple:uniforms.uPurple, uBlue:uniforms.uBlue, uLightDir:uniforms.uLightDir, uFlickerAmp:uniforms.uFlickerAmp },
+      vertexShader: heartMat.vertexShader, fragmentShader: heartMat.fragmentShader
+    });
+    const tvPoints = new THREE.Points(tvGeom, tvMat);
+    scene.add(tvPoints);
+
+    // 柔和地面与环境
+    const ground = new THREE.Mesh(new THREE.CircleGeometry(560, 48), new THREE.MeshBasicMaterial({ color:0x0b1018 })); // 最底层圆盘直径扩大为原来的 4/3
+    ground.rotation.x = -Math.PI/2; ground.position.y = BASE_Y - 1; scene.add(ground);
+
+    // 底座下方：粉色与金色交替的粒子圆盘（直径为“原本底座圆盘直径”的 7/6）
+    // 说明：这里以原始 BASE_R=140 为参考（未扩大前），新圆盘半径设为 140 * 7/6 ≈ 163.3
+    // 如果你希望以当前扩大后的底座半径为参考，可改为 PG_R = BASE_R * (7/6)
+    const PG_COUNT = 1600;
+    const ORIG_BASE_R = 140 * (3/8); // 原本底座半径按 3/8 缩小（用于派生盘）
+    const PG_R = ORIG_BASE_R * (7/6);
+    const PG_Y = BASE_Y - 30.0; // 进一步下移（在 -24 的基础上再向下 6），让层次更分明
+    const PG_SECTORS = 12;      // 交替的扇区数量（偶数值更清晰）
+    const pgPos   = new Float32Array(PG_COUNT*3); // 顶点着色器计算实际位置，此处占位
+    const pgSize  = new Float32Array(PG_COUNT);
+    const pgOffset= new Float32Array(PG_COUNT);
+    const pgAng   = new Float32Array(PG_COUNT);
+    const pgRad   = new Float32Array(PG_COUNT);
+    const pgKind  = new Float32Array(PG_COUNT);   // 0: 粉色, 1: 金色（按角度扇区交替）
+    const pgDensity = new Float32Array(PG_COUNT);  // 用于尺寸/亮度略微分层
+    for (let i=0;i<PG_COUNT;i++){
+      const u = Math.random();
+      const rho = PG_R * Math.sqrt(u); // 均匀采样圆盘（面积均匀）
+      const ang = Math.random() * Math.PI * 2;
+      pgAng[i] = ang; pgRad[i] = rho;
+      // 扇区交替决定颜色：偶数扇区粉，奇数扇区金
+      const sector = Math.floor((ang / (Math.PI*2)) * PG_SECTORS);
+      pgKind[i] = (sector % 2 === 0) ? 0.0 : 1.0;
+      // 大小与亮度微调：靠近外缘略大略亮
+      const edgeBias = rho / PG_R;
+      const dens = 0.55 + 0.35 * edgeBias + Math.random()*0.10; // 0.55..1.0
+      pgDensity[i] = dens;
+      pgSize[i] = 1.0 + dens*1.2 + Math.random()*0.5;
+      pgOffset[i] = Math.random() * Math.PI * 2;
+      // 由顶点着色器计算实际位置，这里占位
+      pgPos[i*3+0]=0; pgPos[i*3+1]=0; pgPos[i*3+2]=0;
+    }
+    const pgGeom = new THREE.BufferGeometry();
+    pgGeom.setAttribute('position', new THREE.BufferAttribute(pgPos, 3));
+    pgGeom.setAttribute('aSize', new THREE.BufferAttribute(pgSize, 1));
+    pgGeom.setAttribute('aOffset', new THREE.BufferAttribute(pgOffset, 1));
+    pgGeom.setAttribute('aAng', new THREE.BufferAttribute(pgAng, 1));
+    pgGeom.setAttribute('aRadius', new THREE.BufferAttribute(pgRad, 1));
+    pgGeom.setAttribute('aKind', new THREE.BufferAttribute(pgKind, 1));
+    pgGeom.setAttribute('aDensity', new THREE.BufferAttribute(pgDensity, 1));
+    const pgUniforms = {
+      uTime: uniforms.uTime,
+      uBaseY: { value: PG_Y },
+      uPerspective: { value: 460.0 },
+      uPink: { value: new THREE.Color('#ff7bbd') },
+      uGold: { value: new THREE.Color('#ffd54f') },
+      uDisperse: uniforms.uDisperse
+    };
+    const pgMat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: pgUniforms,
+      vertexShader: /* glsl */`
+        uniform float uTime; uniform float uPerspective; uniform float uBaseY; uniform float uDisperse;
+        attribute float aSize; attribute float aOffset; attribute float aAng; attribute float aRadius; attribute float aKind; attribute float aDensity;
+        varying float vKind; varying float vAlpha; varying float vDensity;
+        void main(){
+          // 缓慢旋转 + 轻微涟漪，使粉/金扇区有柔和的动态
+          float theta = aAng + uTime * (0.22 + 0.10*sin(uTime*0.8 + aOffset));
+          float rad   = aRadius + 4.0*sin(uTime*1.1 + aOffset);
+          // 扩散：半径随 uDisperse 增强
+          rad *= (1.0 + 1.1*uDisperse);
+          vec3 pos = vec3(cos(theta) * rad, uBaseY + 0.6*sin(uTime*1.0 + aOffset), sin(theta) * rad);
+          vKind = aKind; vDensity = aDensity;
+          vAlpha = 0.65 + 0.35 * aDensity;
+          vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+          gl_Position = projectionMatrix * mv;
+          float dist = -mv.z;
+          gl_PointSize = aSize * (uPerspective / max(60.0, dist));
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float; uniform float uTime; uniform vec3 uPink; uniform vec3 uGold; uniform float uDisperse; varying float vKind; varying float vAlpha; varying float vDensity;
+        void main(){
+          vec2 uv = gl_PointCoord - 0.5; float d = length(uv);
+          float circle = smoothstep(0.50, 0.22, d);
+          float sparkle = 0.24 * pow(1.0 - smoothstep(0.0, 0.25, d), 3.0) * (0.5 + 0.5*sin(uTime*8.0));
+          vec3 baseCol = mix(uPink, uGold, clamp(vKind, 0.0, 1.0));
+          vec3 color = baseCol * (0.80 + 0.20*vDensity) + vec3(sparkle);
+          float alpha = circle * vAlpha * (0.80 + 0.20*vDensity);
+          alpha *= (1.0 - uDisperse);
+          if (alpha < 0.02) discard; gl_FragColor = vec4(color, alpha);
+        }
+      `
+    });
+    const pgPoints = new THREE.Points(pgGeom, pgMat);
+    scene.add(pgPoints);
+
+    // 底座上方：粉色与金色交替的粒子圆盘（直径为“原本底座圆盘直径”的 9/6）
+    // 以原始 BASE_R=140 为参考，新圆盘半径设为 140 * 9/6 = 210
+    const PA_COUNT = 1400;
+    const PA_R = ORIG_BASE_R * (9/6);
+    const PA_Y = BASE_Y + 5.5; // 与下面“底盘”(ground, y=BASE_Y-1)的垂直距离精确为原来的一半：原为13，现在为6.5
+    const PA_SECTORS = 12;      // 交替扇区数量
+    const paPos   = new Float32Array(PA_COUNT*3);
+    const paSize  = new Float32Array(PA_COUNT);
+    const paOffset= new Float32Array(PA_COUNT);
+    const paAng   = new Float32Array(PA_COUNT);
+    const paRad   = new Float32Array(PA_COUNT);
+    const paKind  = new Float32Array(PA_COUNT);   // 0: 粉色, 1: 金色
+    const paDensity = new Float32Array(PA_COUNT);
+    for (let i=0;i<PA_COUNT;i++){
+      const u = Math.random();
+      const rho = PA_R * Math.sqrt(u);
+      const ang = Math.random() * Math.PI * 2;
+      paAng[i] = ang; paRad[i] = rho;
+      const sector = Math.floor((ang / (Math.PI*2)) * PA_SECTORS);
+      paKind[i] = (sector % 2 === 0) ? 0.0 : 1.0;
+      const edgeBias = rho / PA_R;
+      const dens = 0.55 + 0.35 * edgeBias + Math.random()*0.10;
+      paDensity[i] = dens;
+      paSize[i] = 1.0 + dens*1.2 + Math.random()*0.5;
+      paOffset[i] = Math.random() * Math.PI * 2;
+      paPos[i*3+0]=0; paPos[i*3+1]=0; paPos[i*3+2]=0;
+    }
+    const paGeom = new THREE.BufferGeometry();
+    paGeom.setAttribute('position', new THREE.BufferAttribute(paPos, 3));
+    paGeom.setAttribute('aSize', new THREE.BufferAttribute(paSize, 1));
+    paGeom.setAttribute('aOffset', new THREE.BufferAttribute(paOffset, 1));
+    paGeom.setAttribute('aAng', new THREE.BufferAttribute(paAng, 1));
+    paGeom.setAttribute('aRadius', new THREE.BufferAttribute(paRad, 1));
+    paGeom.setAttribute('aKind', new THREE.BufferAttribute(paKind, 1));
+    paGeom.setAttribute('aDensity', new THREE.BufferAttribute(paDensity, 1));
+    const paUniforms = {
+      uTime: uniforms.uTime,
+      uBaseY: { value: PA_Y },
+      uPerspective: { value: 460.0 },
+      uPink: { value: new THREE.Color('#ff7bbd') },
+      uGold: { value: new THREE.Color('#ffd54f') },
+      uDisperse: uniforms.uDisperse
+    };
+    const paMat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: paUniforms,
+      vertexShader: /* glsl */`
+        uniform float uTime; uniform float uPerspective; uniform float uBaseY; uniform float uDisperse;
+        attribute float aSize; attribute float aOffset; attribute float aAng; attribute float aRadius; attribute float aKind; attribute float aDensity;
+        varying float vKind; varying float vAlpha; varying float vDensity;
+        void main(){
+          // 顶盘轻微旋转 + 涟漪，与底盘参数略有不同以形成层级差异
+          float theta = aAng + uTime * (0.18 + 0.08*sin(uTime*0.9 + aOffset));
+          float rad   = aRadius + 3.2*sin(uTime*1.0 + aOffset);
+          rad *= (1.0 + 1.1*uDisperse);
+          vec3 pos = vec3(cos(theta) * rad, uBaseY + 0.6*sin(uTime*1.1 + aOffset), sin(theta) * rad);
+          vKind = aKind; vDensity = aDensity;
+          vAlpha = 0.65 + 0.35 * aDensity;
+          vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+          gl_Position = projectionMatrix * mv;
+          float dist = -mv.z;
+          gl_PointSize = aSize * (uPerspective / max(60.0, dist));
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float; uniform float uTime; uniform vec3 uPink; uniform vec3 uGold; uniform float uDisperse; varying float vKind; varying float vAlpha; varying float vDensity;
+        void main(){
+          vec2 uv = gl_PointCoord - 0.5; float d = length(uv);
+          float circle = smoothstep(0.50, 0.22, d);
+          float sparkle = 0.22 * pow(1.0 - smoothstep(0.0, 0.25, d), 3.0) * (0.5 + 0.5*sin(uTime*7.6));
+          vec3 baseCol = mix(uPink, uGold, clamp(vKind, 0.0, 1.0));
+          vec3 color = baseCol * (0.80 + 0.20*vDensity) + vec3(sparkle);
+          float alpha = circle * vAlpha * (0.80 + 0.20*vDensity);
+          alpha *= (1.0 - uDisperse);
+          if (alpha < 0.02) discard; gl_FragColor = vec4(color, alpha);
+        }
+      `
+    });
+    const paPoints = new THREE.Points(paGeom, paMat);
+    scene.add(paPoints);
+
+    // 透明心形台：使用 heartPoint 轮廓挤出为薄板，尺寸与当前心形主体一致（与 SCALE 匹配）
+    (function(){
+      const samples = 240;
+      // 固定随机种子（确保每次刷新位置/姿态一致）。如需更改布局，只需修改 D_SEED 值。
+      const D_SEED = 20251107;
+      function mulberry32(a){
+        return function(){
+          let t = a += 0x6D2B79F5;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+      const rand = mulberry32(D_SEED);
+      const shapePts = [];
+      for(let i=0;i<=samples;i++){
+        const t = (i/samples) * Math.PI * 2;
+        const hp = heartPoint(t).multiplyScalar(SCALE); // 使用与心形主体一致的缩放
+        // 在平面上将 heartPoint 的 y 作为 z，以得到心形平面轮廓（XZ）
+        shapePts.push(new THREE.Vector2(hp.x, hp.y));
+      }
+      const heartShape = new THREE.Shape(shapePts);
+      const plateThickness = S_CM * 0.6; // 约 0.6 cm 厚
+      const extrude = new THREE.ExtrudeGeometry(heartShape, { depth: plateThickness, bevelEnabled:false, steps:1 });
+      // 将挤出的 Z 厚度转为世界的 Y 厚度（让台面水平放置）
+      extrude.rotateX(-Math.PI/2);
+      extrude.translate(0, 0, -plateThickness/2); // 居中厚度
+      const plateMat = new THREE.MeshPhysicalMaterial({
+        color: 0xffffff,
+        roughness: 0.08,
+        metalness: 0.0,
+        transmission: 0.95,
+        ior: 1.5,
+        thickness: plateThickness,
+        attenuationColor: new THREE.Color(0xffffff),
+        attenuationDistance: S_CM * 12.0, // 光透衰减
+        transparent: true,
+        side: THREE.DoubleSide
+      });
+      const plate = new THREE.Mesh(extrude, plateMat);
+      const PLATE_Y = BASE_Y + 4.0; // 心形台位于底盘之上约 4 个单位
+      plate.position.set(0, PLATE_Y, 0);
+      scene.add(plate);
+      // 暴露台面以便主循环施加心跳缩放，同时记录初始 Y
+      window.heartPlate = plate;
+      plate.userData.baseY = PLATE_Y;
+      // 提升台面附近的可见度：增加一盏柔和点光源，突出透明饺子的折射/反射
+      const plateLight = new THREE.PointLight(0xfff0e6, 0.95, 200, 2.6);
+      plateLight.position.set(0, PLATE_Y + 8, 8);
+      plateLight.castShadow = true;
+      scene.add(plateLight);
+      // 初始视角对准心形台，使周围的水晶饺更容易看到
+      if (typeof controls !== 'undefined') {
+        controls.target.set(0, PLATE_Y, 0);
+        controls.update();
+      }
+
+      // 删除水晶饺：将数量设为 0，并跳过生成与摆放流程
+      const D_COUNT = 0; // 0 表示不生成水晶饺
+      if (D_COUNT > 0) {
+        const innerOffset = S_CM * 10.0; // 内缘外扩 10cm
+        const outerOffset = S_CM * 15.0; // 外缘外扩 15cm
+        const minGapInnerLow  = S_CM * 1.0;
+        const minGapInnerHigh = S_CM * 2.0;
+        const minGapOuterLow  = S_CM * 2.0;
+        const minGapOuterHigh = S_CM * 3.0;
+        const targets = [];
+        const placed = [];
+        const outlines = [];
+        for(let i=0;i<samples;i++){
+          const t = (i/samples) * Math.PI * 2;
+          const hp = heartPoint(t).multiplyScalar(SCALE);
+          outlines.push(new THREE.Vector2(hp.x, hp.y));
+        }
+        function tryPlace(pos, gap){
+          for(const p of placed){ if (pos.distanceTo(p) < gap) return false; }
+          placed.push(pos.clone()); return true;
+        }
+        let trials = 0;
+        while(targets.length < D_COUNT && trials < 2000){
+          trials++;
+          const idx = Math.floor(rand() * outlines.length);
+          const p  = outlines[idx];
+          const n  = p.clone().normalize();
+          const off= innerOffset + rand()*(outerOffset-innerOffset);
+          const pos= new THREE.Vector2(p.x + n.x*off, p.y + n.y*off);
+          const isInner = off < (innerOffset + (outerOffset-innerOffset)*0.3);
+          let gap = isInner
+            ? (minGapInnerLow + rand()*(minGapInnerHigh - minGapInnerLow))
+            : (minGapOuterLow + rand()*(minGapOuterHigh - minGapOuterLow));
+          const overlapFavor = (rand() < 0.18) ? 0.85 : 1.0;
+          gap *= overlapFavor;
+          if (tryPlace(pos, gap)) targets.push(pos);
+        }
+        function makeDumplingMesh(){ /* 已删除生成，保留空函数以备未来恢复 */ }
+        for(const p of targets){ /* D_COUNT 为 0 不会进入 */ }
+      }
+    })();
+
+    // 连接过渡层：从底座到心形的上升粒子（更细更暗，带拖影）
+    const CONNECT_COUNT = 1500;
+    const connPos   = new Float32Array(CONNECT_COUNT*3);
+    const connVel   = new Float32Array(CONNECT_COUNT*3);
+    const connSize  = new Float32Array(CONNECT_COUNT);
+    const connHue   = new Float32Array(CONNECT_COUNT);
+    const connPhase = new Float32Array(CONNECT_COUNT);
+    const connTgt   = new Float32Array(CONNECT_COUNT*3);
+    const connStage = new Uint8Array(CONNECT_COUNT); // 0: base->gate, 1: gate->heart
+    const connAng   = new Float32Array(CONNECT_COUNT); // 用于路径旋涡
+
+    // 中间中心（gate）位于底座与爱心之间
+    const GATE_Y = BASE_Y + (HEART_Y - BASE_Y) * 0.5;
+    const GATE_RADIUS = 34; // 中心半径
+    const ATTRACT_CONN1 = 0.025; // 吸向 gate
+    const ATTRACT_CONN2 = 0.020; // 从 gate 扩散向心形
+    const DAMP_CONN = 0.986;
+    const SWIRL1 = 18.0;  // gate 段的旋涡强度（乘以 dt 再缩小）
+    const SWIRL2 = 9.0;   // heart 段的旋涡强度
+    const GATE_THRESH = 8.0; // gate 接近阈值
+
+    function sampleGate(){
+      const ang = Math.random() * Math.PI * 2;
+      const r   = GATE_RADIUS * (0.3 + Math.random()*0.7);
+      return new THREE.Vector3(Math.cos(ang)*r, GATE_Y, Math.sin(ang)*r);
+    }
+
+    function resetConn(i){
+      const p = sampleBase();
+      const h = sampleHeartVolume();
+      connPos[i*3+0]=p.x; connPos[i*3+1]=p.y; connPos[i*3+2]=p.z;
+      connVel[i*3+0]=(Math.random()-0.5)*0.25; connVel[i*3+1]=0.8+Math.random()*0.6; connVel[i*3+2]=(Math.random()-0.5)*0.25;
+      // 直接以心形体积为目标，不再经过中间 gate
+      connTgt[i*3+0]=h.x; connTgt[i*3+1]=h.y; connTgt[i*3+2]=h.z;
+      connStage[i]=1; connAng[i]=Math.random()*Math.PI*2;
+      connSize[i]=1.2 + Math.random()*1.0; connHue[i]= (Math.random()<0.6? (0.58+Math.random()*0.10) : (0.72+Math.random()*0.10));
+      connPhase[i]=Math.random()*Math.PI*2;
+    }
+    for (let i=0;i<CONNECT_COUNT;i++) resetConn(i);
+    const connGeom = new THREE.BufferGeometry();
+    connGeom.setAttribute('position', new THREE.BufferAttribute(connPos,3));
+    connGeom.setAttribute('aSize', new THREE.BufferAttribute(connSize,1));
+    connGeom.setAttribute('aOffset', new THREE.BufferAttribute(connPhase,1));
+    connGeom.setAttribute('aHue', new THREE.BufferAttribute(connHue,1));
+    const connMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: { uTime: uniforms.uTime, uBreathAmp:{value:0.0}, uDriftAmp:{value:0.0}, uBaseBlue:uniforms.uBaseBlue, uBaseWhite:uniforms.uBaseWhite, uBasePurple:uniforms.uBasePurple, uPurple:uniforms.uPurple, uBlue:uniforms.uBlue, uLightDir:uniforms.uLightDir, uFlickerAmp:uniforms.uFlickerAmp, uDisperse:uniforms.uDisperse, uHighlightGain:{value:0.8}, uPerspective:{value:480.0}},
+      vertexShader: heartMat.vertexShader, fragmentShader: heartMat.fragmentShader
+    });
+    const connPoints = new THREE.Points(connGeom, connMat); scene.add(connPoints);
+
+    // 动画主循环
+    let t0 = performance.now();
+  function animate(){
+      const now = performance.now(); const dt = (now - t0) / 1000; t0 = now;
+      uniforms.uTime.value += dt;
+      portalUniforms.uTime.value = uniforms.uTime.value;
+      // 同步星空时间（星空的 starUniforms 在顶部独立定义）
+      if (typeof starUniforms !== 'undefined') { starUniforms.uTime.value = uniforms.uTime.value; }
+
+      // 心跳：台面随心形同步轻微缩放与上抬
+      if (window.heartPlate){
+        const beatFreq = uniforms.uBeatFreq.value || 1.6;
+        const s = 0.5 + 0.5 * Math.sin(uniforms.uTime.value * (2.0*beatFreq));
+        const beatPulse = Math.pow(s, 5.0);
+        const scale = 1.0 + 0.010 * beatPulse;
+        window.heartPlate.scale.set(scale, 1.0, scale);
+        const baseY = window.heartPlate.userData.baseY || window.heartPlate.position.y;
+        window.heartPlate.position.y = baseY + 0.6 * beatPulse;
+      }
+
+      // 扩散同步烟花强度：当 fwIntensity 接近满屏（>0.9）再缓慢进入 0→1
+      const fwI = (typeof window.fwIntensity === 'number') ? window.fwIntensity : 0.0;
+      const targetDisp = Math.max(0.0, Math.min(1.0, (fwI - 0.90) / 0.10)); // 0.90→1.00 映射到 0→1
+      const catchup = Math.max(0.01, Math.min(0.08, dt * 0.06)); // 低通平滑，保证“慢一点”
+      uniforms.uDisperse.value = Math.min(1.0, uniforms.uDisperse.value + (targetDisp - uniforms.uDisperse.value) * catchup);
+      // 暴露当前扩散值，供覆盖层决定是否显示最终祝福文字
+      window.uDisperse = uniforms.uDisperse.value;
+
+      // 更新底座旋涡与涟漪效果
+      for (let i=0;i<BASE_COUNT;i++){
+        // 底盘统一方向与速度，保证三维方向观感一致
+        baseAng[i] += 0.4*dt;
+        const ripple = 6.0*Math.sin(uniforms.uTime.value*2.0 + i*0.013);
+        let rad = baseRad[i] + 8.0*Math.sin(uniforms.uTime.value*1.3 + i*0.017);
+        // 扩散：半径随 uDisperse 增长（更慢更克制）
+        rad *= (1.0 + 1.2*uniforms.uDisperse.value);
+        const sway = Math.sin(uniforms.uTime.value*0.8 + i*0.02) * 0.8; // 轻微额外起伏
+        basePos[i*3+0] = Math.cos(baseAng[i]) * rad;
+        basePos[i*3+1] = BASE_Y + baseYOffset[i] + ripple*0.12 + sway*0.1;
+        basePos[i*3+2] = Math.sin(baseAng[i]) * rad;
+      }
+      baseGeom.attributes.position.needsUpdate = true;
+
+      // 更新桥接层：在底座与心形底部之间上下往复流动，并带轻微旋涡
+      for (let i=0;i<BRIDGE_COUNT;i++){
+        // 进度推进（到边界反向）
+        const speed = (bridgeDir[i] > 0 ? BRIDGE_UP_SPEED : BRIDGE_DOWN_SPEED);
+        bridgeProg[i] += speed * dt;
+        if (bridgeProg[i] >= 1.0){ bridgeProg[i] = 1.0; bridgeDir[i] = -1; }
+        if (bridgeProg[i] <= 0.0){ bridgeProg[i] = 0.0; bridgeDir[i] = 1; }
+        // 角度旋转形成微旋涡，靠上稍强
+        const swirlGain = BRIDGE_SWIRL * (0.6 + 0.4*bridgeProg[i]) * bridgeSpinDir[i];
+        bridgeAng[i] += dt * (0.8 + 0.6*Math.sin(uniforms.uTime.value*0.7 + bridgePhase[i])) * swirlGain;
+        // 半径随进度轻微呼吸，靠上略收紧形成视觉汇聚
+        const rad = bridgeRad[i] + 6.0*Math.sin(uniforms.uTime.value*1.3 + bridgePhase[i]) - 4.0*bridgeProg[i];
+        const x = Math.cos(bridgeAng[i]) * rad;
+        const z = Math.sin(bridgeAng[i]) * rad;
+        const y = BASE_Y + bridgeProg[i] * spanY + 0.9*Math.sin(uniforms.uTime.value*1.2 + bridgePhase[i]) + 0.6*Math.sin(uniforms.uTime.value*1.8);
+        bridgePos[i*3+0]=x; bridgePos[i*3+1]=y; bridgePos[i*3+2]=z;
+      }
+      bridgeGeom.attributes.position.needsUpdate = true;
+
+      // （删除）原“环间流动层”（River Layer）更新逻辑已移除
+
+      // 更新尾部流动层：围绕心形底部向内/外圈扩散的螺旋与往复
+      for (let i=0;i<TAIL_COUNT;i++){
+        const tgtR = tailTgtBand[i]===0 ? R_IN : R_OUT;
+        const rs = (tailDir[i] > 0 ? TAIL_RAD_SPEED : TAIL_RAD_SPEED*0.92);
+        tailProg[i] += rs * dt;
+        if (tailProg[i] >= 1.0){ tailProg[i] = 1.0; tailDir[i] = -1; }
+        if (tailProg[i] <= 0.0){ tailProg[i] = 0.0; tailDir[i] = 1; }
+        tailAng[i] += dt * (TAIL_TANG_SPEED + 0.35*Math.sin(uniforms.uTime.value*0.9 + tailPhase[i]));
+        const rad = TAIL_R0 + (tgtR - TAIL_R0) * tailProg[i] + 3.5*Math.sin(uniforms.uTime.value*1.5 + tailPhase[i]) - 2.8*tailProg[i];
+        tailPos[i*3+0] = Math.cos(tailAng[i]) * rad;
+        tailPos[i*3+1] = TAIL_Y + 1.1*Math.sin(uniforms.uTime.value*1.2 + tailPhase[i]) + 0.8*Math.sin(uniforms.uTime.value*1.9);
+        tailPos[i*3+2] = Math.sin(tailAng[i]) * rad;
+      }
+      tailGeom.attributes.position.needsUpdate = true;
+
+      // 更新环间直接通道流：沿通道角度在内圈与外圈之间径向来回
+      for (let i=0;i<RIVD_COUNT;i++){
+        rivdProg[i] += (rivdDir[i] > 0 ? RIVD_RAD_SPEED : RIVD_RAD_SPEED*0.92) * dt;
+        if (rivdProg[i] >= 1.0){ rivdProg[i] = 1.0; rivdDir[i] = -1; }
+        if (rivdProg[i] <= 0.0){ rivdProg[i] = 0.0; rivdDir[i] = 1; }
+        // 切向缓慢旋转，保持靠近通道中心角度
+        const baseAng = chanAngles[rivdChanId[i]];
+        rivdAng[i] += dt * (RIVD_TANG_SPEED + 0.18*Math.sin(uniforms.uTime.value*0.9 + rivdPhase[i]));
+        rivdAng[i] = baseAng + clamp(rivdAng[i] - baseAng, -0.22, 0.22);
+        const rad = R_IN + (R_OUT - R_IN) * rivdProg[i] + 3.5*Math.sin(uniforms.uTime.value*1.4 + rivdPhase[i]) * (0.5 + 0.5*rivdProg[i]);
+        rivdPos[i*3+0] = Math.cos(rivdAng[i]) * rad;
+        rivdPos[i*3+1] = rivdYBase + 0.8*Math.sin(uniforms.uTime.value*1.1 + rivdPhase[i]);
+        rivdPos[i*3+2] = Math.sin(rivdAng[i]) * rad;
+      }
+      rivdGeom.attributes.position.needsUpdate = true;
+
+      // 更新上下圆环之间的垂直通道流（Stack Layer）：更凌乱的错落往返
+      if (typeof STACK_COUNT !== 'undefined'){
+        for (let i=0;i<STACK_COUNT;i++){
+          // 垂直进度与反向
+          stackProg[i] += (stackDir[i] > 0 ? stackUpSpd[i] : stackDnSpd[i]) * dt;
+          if (stackProg[i] >= 1.0){ stackProg[i] = 1.0; stackDir[i] = -1; }
+          if (stackProg[i] <= 0.0){ stackProg[i] = 0.0; stackDir[i] = 1; }
+          // 旋转的凌乱感：切向速度因子 + 抖动
+          const tangJitter = (0.12 + 0.20*Math.random()) * Math.sin(uniforms.uTime.value*0.8 + stackPhase[i]);
+          stackAng[i] += (stackTangSpd[i]*dt) + (tangJitter*dt);
+          // 半径与高度加入更强抖动
+          const radNoise = stackRadJit[i] * Math.sin(uniforms.uTime.value*1.0 + stackPhase[i]) + 0.35*Math.sin(uniforms.uTime.value*2.1 + stackPhase[i]*0.6);
+          const rad = stackRad[i] + radNoise;
+          const y   = BASE_Y + stackProg[i] * (UPPER_RING_Y - BASE_Y) * stackSpanVar[i] + stackYOff[i]
+                       + 0.35*Math.sin(uniforms.uTime.value*1.2 + stackPhase[i]) + 0.25*Math.sin(uniforms.uTime.value*1.8 + stackPhase[i]*0.7);
+          stackPos[i*3+0] = Math.cos(stackAng[i]) * rad;
+          stackPos[i*3+1] = y;
+          stackPos[i*3+2] = Math.sin(stackAng[i]) * rad;
+        }
+        stackGeom.attributes.position.needsUpdate = true;
+      }
+
+      // 更新尾部→内圈径向直流：从尾部向内圈往复
+      for (let i=0;i<T2I_COUNT;i++){
+        t2iProg[i] += (t2iDir[i] > 0 ? T2I_RAD_SPEED : T2I_RAD_SPEED*0.92) * dt;
+        if (t2iProg[i] >= 1.0){ t2iProg[i] = 1.0; t2iDir[i] = -1; }
+        if (t2iProg[i] <= 0.0){ t2iProg[i] = 0.0; t2iDir[i] = 1; }
+        t2iAng[i] += dt * (T2I_TANG_SPEED + 0.20*Math.sin(uniforms.uTime.value*0.9 + t2iPhase[i]));
+        // 径向从尾部到内圈并轻微收紧
+        const rad = TAIL_R0 + (R_IN - TAIL_R0) * t2iProg[i] + 3.0*Math.sin(uniforms.uTime.value*1.3 + t2iPhase[i]) - 2.2*t2iProg[i];
+        t2iPos[i*3+0] = Math.cos(t2iAng[i]) * rad;
+        t2iPos[i*3+1] = TAIL_Y + 1.0*Math.sin(uniforms.uTime.value*1.2 + t2iPhase[i]);
+        t2iPos[i*3+2] = Math.sin(t2iAng[i]) * rad;
+      }
+      t2iGeom.attributes.position.needsUpdate = true;
+
+      // 更新尾巴尖尖→内圈的垂直直达流（Tail Vertical Layer）：升降错落、旋转前进
+      if (typeof TV_COUNT !== 'undefined'){
+        for (let i=0;i<TV_COUNT;i++){
+          tvProg[i] += (tvDir[i] > 0 ? tvUpSpd[i] : tvDnSpd[i]) * dt;
+          if (tvProg[i] >= 1.0){ tvProg[i] = 1.0; tvDir[i] = -1; }
+          if (tvProg[i] <= 0.0){ tvProg[i] = 0.0; tvDir[i] = 1; }
+          const tangDrift = (0.06 + 0.18*Math.random()) * Math.sin(uniforms.uTime.value*0.9 + tvPhase[i]);
+          tvAng[i] += (tvTangSpd[i]*dt) + (tangDrift*dt);
+          const rad = TAIL_R0 + (R_IN - TAIL_R0) * (0.20 + tvProg[i]*0.80);
+          const y   = TAIL_Y - tvProg[i] * (TAIL_Y - BASE_Y) + tvYOff[i]
+                      + 0.28*Math.sin(uniforms.uTime.value*1.3 + tvPhase[i]);
+          tvPos[i*3+0] = Math.cos(tvAng[i]) * rad;
+          tvPos[i*3+1] = y;
+          tvPos[i*3+2] = Math.sin(tvAng[i]) * rad;
+        }
+        tvGeom.attributes.position.needsUpdate = true;
+      }
+
+      // 更新心形粒子的上升与定居
+      for (let i=0;i<HEART_COUNT;i++){
+        const px = heartPos[i*3+0], py = heartPos[i*3+1], pz = heartPos[i*3+2];
+        const tx = heartTgt[i*3+0], ty = heartTgt[i*3+1], tz = heartTgt[i*3+2];
+        // 扩散方向：指向远离心形中心（0, HEART_Y, 0）
+        const cx = 0.0, cy = HEART_Y, cz = 0.0;
+        const dxC = px - cx, dyC = py - cy, dzC = pz - cz;
+        const lenC = Math.max(1e-4, Math.sqrt(dxC*dxC + dyC*dyC + dzC*dzC));
+        const nxC = dxC/lenC, nyC = dyC/lenC, nzC = dzC/lenC;
+
+        if (heartState[i] === 0){ // rising
+          const ax = (tx - px) * ATTRACT;
+          const ay = (ty - py) * ATTRACT + UP_BOOST;
+          const az = (tz - pz) * ATTRACT;
+          heartVel[i*3+0] = (heartVel[i*3+0] + ax) * DAMP;
+          heartVel[i*3+1] = (heartVel[i*3+1] + ay) * DAMP;
+          heartVel[i*3+2] = (heartVel[i*3+2] + az) * DAMP;
+          heartPos[i*3+0] += heartVel[i*3+0];
+          heartPos[i*3+1] += heartVel[i*3+1];
+          heartPos[i*3+2] += heartVel[i*3+2];
+          // 接近目标则定居
+          const dx = tx - heartPos[i*3+0], dy = ty - heartPos[i*3+1], dz = tz - heartPos[i*3+2];
+          const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+          if (dist < SETTLE_DIST){ heartState[i] = 1; heartLife[i] = 3.5 + Math.random()*5.0; heartMax[i]=heartLife[i]; }
+        } else { // settled
+          // 仅在心形框架内缓慢跳动（更小的吸附与抖动），不再返回底座
+          heartPos[i*3+0] += (tx - px)*0.025 + Math.sin(uniforms.uTime.value*2.6 + heartPhase[i])*0.02;
+          heartPos[i*3+1] += (ty - py)*0.025 + Math.cos(uniforms.uTime.value*2.2 + heartPhase[i])*0.018;
+          heartPos[i*3+2] += (tz - pz)*0.025 + Math.sin(uniforms.uTime.value*2.0 + heartPhase[i])*0.02;
+          // 扩散：向外轻推（随时间增强，速度更慢，乘以 dt）
+          const push = 0.28 * uniforms.uDisperse.value * dt;
+          heartPos[i*3+0] += nxC * push;
+          heartPos[i*3+1] += nyC * push;
+          heartPos[i*3+2] += nzC * push;
+          // 轻微限制最大偏移，确保在目标附近
+          const dx2 = heartPos[i*3+0]-tx, dy2 = heartPos[i*3+1]-ty, dz2 = heartPos[i*3+2]-tz;
+          const d2 = Math.sqrt(dx2*dx2 + dy2*dy2 + dz2*dz2);
+          if (d2 > 2.8){
+            heartPos[i*3+0] = tx + dx2 * (2.8/d2);
+            heartPos[i*3+1] = ty + dy2 * (2.8/d2);
+            heartPos[i*3+2] = tz + dz2 * (2.8/d2);
+          }
+        }
+      }
+      geom.attributes.position.needsUpdate = true;
+
+    glowLight.intensity = 1.6 + 0.6*Math.sin(uniforms.uTime.value*1.8);
+    controls.update();
+    // 更新前景遮挡矩形（屏幕投影），供烟花覆盖层使用
+    updateFwMaskRect();
+    composer.render();
+    requestAnimationFrame(animate);
+  }
+  animate();
+
+  window.addEventListener('resize', ()=>{
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+    camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+    // 重新计算遮挡矩形
+    updateFwMaskRect();
+  });
+  </script>
+  <!-- 背景音乐：Leona Lewis - Bleeding Love -->
+  <script>
+    (function(){
+      try{
+        const params = new URLSearchParams(location.search);
+        const userSrc = params.get('music') || params.get('bg') || '';
+        const candidates = [];
+        if (userSrc) candidates.push(userSrc);
+        candidates.push('bleeding_love.mp3'); // 本地文件（请放置于同目录）
+        // 如需添加你的在线地址，可在 URL 参数 ?music=<url> 传入
+
+        const audio = document.createElement('audio');
+        audio.id = 'bgMusic';
+        audio.loop = true;
+        audio.preload = 'auto';
+        audio.crossOrigin = 'anonymous';
+        audio.controls = false;
+        audio.style.display = 'none';
+        audio.autoplay = true;
+        audio.playsInline = true;
+        audio.volume = 0.0; // 先静音开启，规避自动播放策略
+        audio.muted = true;
+        document.body.appendChild(audio);
+
+        let idx = 0; function setNextSrc(){ if (idx < candidates.length){ audio.src = candidates[idx++]; audio.load(); } }
+        setNextSrc();
+
+        function fadeIn(){
+          let v = 0.0; audio.muted = false;
+          const targetVol = Math.max(0, Math.min(1, parseFloat((new URLSearchParams(location.search)).get('vol') || '0.6')));
+          const step = Math.max(0.01, parseFloat((new URLSearchParams(location.search)).get('fade_step') || '0.08'));
+          const interval = Math.max(20, parseInt((new URLSearchParams(location.search)).get('fade_interval') || '80', 10));
+          const timer = setInterval(()=>{ v += step; audio.volume = Math.min(targetVol, v); if (v >= targetVol) clearInterval(timer); }, interval);
+        }
+        function tryPlay(){
+          audio.play().then(()=>{ fadeIn(); }).catch(()=>{
+            // 回退：保持静音播放以满足策略
+            audio.muted = true; audio.volume = 0.0;
+            audio.play().then(()=>{ /* 等待用户交互后淡入 */ }).catch(()=>{
+              // 若仍失败，切换下一候选音源
+              setNextSrc();
+            });
+          });
+        }
+        // 页面打开即尝试播放
+        tryPlay();
+        // 兼容策略：在用户首次交互时再尝试淡入
+        const once = ()=>{ tryPlay(); fadeIn(); window.removeEventListener('pointerdown', once); window.removeEventListener('touchstart', once); window.removeEventListener('keydown', once); };
+        window.addEventListener('pointerdown', once, {once:true});
+        window.addEventListener('touchstart', once, {once:true});
+        window.addEventListener('keydown', once, {once:true});
+        audio.addEventListener('canplay', ()=>{ tryPlay(); });
+      }catch(e){ console.warn('背景音乐初始化失败：', e); }
+    })();
+  </script>
+  <!-- 粒子烟花覆盖层（2D 画布），作为全屏的视觉增强效果 -->
+  <script>
+    (function(){
+      const cvs = document.createElement('canvas');
+      cvs.id = 'fwOverlay';
+      document.body.appendChild(cvs);
+      const ctx = cvs.getContext('2d');
+      const dpi = Math.max(1, Math.min(2.5, window.devicePixelRatio||1));
+      function resize(){
+        const w = window.innerWidth, h = window.innerHeight;
+        cvs.width  = Math.floor(w * dpi);
+        cvs.height = Math.floor(h * dpi);
+        cvs.style.width = w + 'px';
+        cvs.style.height= h + 'px';
+        ctx.setTransform(dpi,0,0,dpi,0,0);
+      }
+      resize(); window.addEventListener('resize', resize);
+
+      // 颜色：改为全色相随机，呈现五彩效果
+      function rand(min,max){ return min + Math.random()*(max-min); }
+      function hsvToRgb(h,s,v){
+        let i = Math.floor(h*6), f = h*6 - i; i = i % 6;
+        let p = v*(1-s), q=v*(1-f*s), t=v*(1-(1-f)*s), r,g,b;
+        if (i===0){ r=v; g=t; b=p; }
+        else if (i===1){ r=q; g=v; b=p; }
+        else if (i===2){ r=p; g=v; b=t; }
+        else if (i===3){ r=p; g=q; b=v; }
+        else if (i===4){ r=t; g=p; b=v; }
+        else { r=v; g=p; b=q; }
+        return `rgb(${(r*255)|0},${(g*255)|0},${(b*255)|0})`;
+      }
+      // 渐变调色：蓝→紫→粉→金（用于小爱心字的填充）
+      function hexToRgb(hex){
+        const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return m ? { r: parseInt(m[1],16), g: parseInt(m[2],16), b: parseInt(m[3],16) } : {r:255,g:255,b:255};
+      }
+      function mixRgb(a,b,t){ return { r: Math.round(a.r + (b.r-a.r)*t), g: Math.round(a.g + (b.g-a.g)*t), b: Math.round(a.b + (b.b-a.b)*t) }; }
+      function rgbToCss(o){ return `rgb(${o.r},${o.g},${o.b})`; }
+      const PALETTE = [ hexToRgb('#4da8ff'), hexToRgb('#7f5aff'), hexToRgb('#ff7fb3'), hexToRgb('#ffd05a') ];
+      function paletteFor(nx, ny){
+        // 依据横向位置在四色间线性插值（稳健索引，避免 undefined）
+        const t = Math.max(0, Math.min(1, nx));
+        const segCount = PALETTE.length - 1; // 过渡段数量
+        let seg = Math.floor(t * segCount);
+        if (seg < 0) seg = 0; if (seg >= segCount) seg = segCount - 1;
+        const t0 = seg / segCount;
+        const localT = Math.max(0, Math.min(1, (t - t0) * segCount));
+        const c1 = PALETTE[seg];
+        const c2 = PALETTE[seg + 1] || c1;
+        let col = mixRgb(c1, c2, localT);
+        // 稍加竖向亮度变化，让整体不死板
+        const vBoost = Math.round(20 * (ny-0.5));
+        col.r = Math.max(0, Math.min(255, col.r + vBoost));
+        col.g = Math.max(0, Math.min(255, col.g + vBoost));
+        col.b = Math.max(0, Math.min(255, col.b + vBoost));
+        return rgbToCss(col);
+      }
+      function pickHue(){ return Math.random(); }
+
+      // 物理参数与数量
+      const SPEED_MUL = 1.5; // 整体速度提升为原来的 3/2
+      let GRAVITY = 0.055 * SPEED_MUL; let AIR_DRAG = 0.986;
+      let EXP_COUNT = 280; let EXP_RADIUS = 180; // 略增基础粒子数，整体更密集
+      let SECONDARY_CHANCE = 0.0; // 禁用二次爆炸（按需可改回 >0）
+      let USE_HEART = true;        // 心形为主，呼应爱心主题
+      // 强度渐增：让烟花数量/规模逐步增加，直至满屏
+      function lerp(a,b,t){ return a + (b-a)*t; }
+      function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+      let intensity = 0; // 0→1 渐增
+      // 将强度暴露为全局，供 3D 场景的扩散节奏使用
+      window.fwIntensity = 0;
+      const RAMP_FRAMES = Math.round(60*12 / SPEED_MUL); // 总体爬坡速度加快到 3/2 倍
+
+      // 爆炸大小配置：不每束都满屏，小/中/大权重为 0.6/0.3/0.1
+      const SIZE_PROFILES = [
+        { kR: 0.45, kC: 0.60, kP: 0.85, weight: 0.60 }, // 小型：半径与数量缩小，粒子也略小
+        { kR: 0.75, kC: 0.85, kP: 1.00, weight: 0.30 }, // 中型：适中
+        { kR: 1.00, kC: 1.00, kP: 1.00, weight: 0.10 }, // 大型：接近满屏（少量）
+      ];
+      function pickProfile(){
+        const sum = SIZE_PROFILES.reduce((a,b)=>a+b.weight,0);
+        let r = Math.random()*sum;
+        for(const p of SIZE_PROFILES){ if((r -= p.weight) <= 0) return p; }
+        return SIZE_PROFILES[0];
+      }
+
+      class Particle{
+        constructor(x,y,vx,vy,color,radius,life){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.color=color; this.radius=radius; this.life=life; this.maxLife=life; this.canSecond=true; }
+        update(){ this.vy += GRAVITY; this.vx *= AIR_DRAG; this.vy *= AIR_DRAG; this.x += this.vx; this.y += this.vy; this.life -= 1; }
+        draw(){
+          const dispersed = (window.uDisperse||0) >= 0.995;
+          const alphaLife = Math.max(0, this.life/this.maxLife);
+          const base = dispersed ? 0.0 : 0.1;
+          const scale = dispersed ? 0.65 : 0.9;
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = Math.min(1, scale*alphaLife + base);
+          ctx.fillStyle = this.color; ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1;
+        }
+      }
+      function heartPoint(t){ const x = 16*Math.sin(t)**3; const y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t); return {x,y}; }
+      class Rocket{
+        constructor(x, origin='bottom', opts=null){
+          const W = (cvs.width/dpi), H = (cvs.height/dpi);
+          this.hue = pickHue();
+          // 多方向升起：底部/左侧/右侧/顶部（更丰富的来源）
+          if (origin === 'left'){
+            // 让左侧发射更靠近画面中部
+            this.x = W * 0.30 + rand(-W*0.04, W*0.04); this.y = H - 8;
+            this.vx = rand(0.8, 1.6) * SPEED_MUL; this.vy = rand(-9.5,-7.8) * SPEED_MUL;
+          } else if (origin === 'right'){
+            // 让右侧发射更靠近画面中部
+            this.x = W * 0.70 + rand(-W*0.04, W*0.04); this.y = H - 8;
+            this.vx = rand(-1.6, -0.8) * SPEED_MUL; this.vy = rand(-9.5,-7.8) * SPEED_MUL;
+          } else if (origin === 'top'){
+            this.x = x; this.y = 14;
+            this.vx = rand(-0.8,0.8) * SPEED_MUL; this.vy = rand(3.0,6.5) * SPEED_MUL; // 向下少量运动，几乎即刻爆炸在顶部附近
+          } else { // bottom
+            this.x = x; this.y = H - 6;
+            this.vx = rand(-0.6,0.6) * SPEED_MUL; this.vy = rand(-10.5,-8.2) * SPEED_MUL;
+          }
+          // 爆炸高度错落分布：在屏幕 18%～82% 范围内随机
+          this.burstHeight = rand((H*0.18), (H*0.82));
+          // 如提供目标爆炸高度，则覆盖
+          if (opts && typeof opts.burstY === 'number'){
+            this.burstHeight = clamp(opts.burstY, H*0.12, H*0.88);
+          }
+        }
+        update(){
+          this.vy += GRAVITY*0.25; this.vx *= AIR_DRAG; this.vy *= AIR_DRAG; this.x += this.vx; this.y += this.vy; // 火箭轨迹
+          const trailCol = hsvToRgb(this.hue, 0.85, 1.0); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.75; ctx.fillStyle = trailCol;
+          // 前景遮挡区域内不绘制轨迹
+          const m = window.fwMaskRect;
+          if (!(m && this.x >= m.x && this.x <= m.x+m.w && this.y >= m.y && this.y <= m.y+m.h)){
+            ctx.fillRect(this.x, this.y, 1, 1);
+          }
+          ctx.globalAlpha = 1;
+        }
+        shouldExplode(){ return this.y <= this.burstHeight || this.vy > -1.5; }
+        explode(){
+          const cx=this.x, cy=this.y; const parts=[]; const prof=pickProfile();
+          const count=Math.max(40, Math.round(EXP_COUNT*prof.kC * lerp(0.8, 2.2, intensity)));
+          let radius=EXP_RADIUS*prof.kR* lerp(0.80, 1.40, intensity); const hue=this.hue;
+          // 粒子更小：减小绘制半径范围与缩放
+          function pr(){ return rand(0.25,0.60)*prof.kP*0.75; }
+          if (!USE_HEART){
+            for(let i=0;i<count;i++){
+              const ang=Math.random()*Math.PI*2;
+              const spd=rand(3.0,6.0) * SPEED_MUL;
+              const vx=Math.cos(ang)*spd;
+              const vy=Math.sin(ang)*spd - rand(0.2,0.6);
+              const col=hsvToRgb((hue+rand(-0.02,0.02)+1)%1, rand(0.6,1.0), rand(0.9,1.0));
+              parts.push(new Particle(cx,cy,vx*(radius/200),vy*(radius/200),col,pr(),rand(45,80)));
+            }
+          } else {
+            for(let i=0;i<count;i++){
+              const t=(i/count)*Math.PI*2;
+              const hp=heartPoint(t);
+              const nx=hp.x, ny=hp.y; const len=Math.hypot(nx,ny)||1;
+              const dirx=nx/len, diry=-ny/len; const spd=rand(2.5,5.0);
+              const vx=dirx*spd*(radius/44) * SPEED_MUL;
+              const vy=diry*spd*(radius/44) * SPEED_MUL - rand(0.2,0.5);
+              const col=hsvToRgb((hue+rand(-0.02,0.02)+1)%1, rand(0.65,1.0), rand(0.95,1.0));
+              parts.push(new Particle(cx,cy,vx,vy,col,pr(),rand(55,90)));
+            }
+          }
+          // 在爆炸中心增加同色暖心话语，并尽量避免与其他句子重叠
+          const lblColor = hsvToRgb(hue, 0.95, 1.0);
+          const fontSize = Math.round(9 + 5*prof.kR); // 字体再小一点
+          const text = pickPhrase();
+          placeTextLabel(cx, cy, lblColor, fontSize, 90, text);
+          return parts;
+        }
+      }
+      // 立冬暖心话语（随机挑选一条，爆炸瞬间显示于中心，颜色与烟花一致）
+      const PHRASES = [
+        '冬安常暖。今日冷，加衣。',
+        '多喝热水。',
+        '别熬夜，乖。',
+        '风大，围巾。',
+        '等你吃饭。',
+        '立冬无恙。早点休息。',
+        '记得吃饭。',
+        '外面风大。',
+        '注意保暖。',
+        '多喝热水。',
+        '别总熬夜。',
+        '空调调低。',
+        '盖好被子。',
+        '路上慢点。',
+        '到家报平安。记得吃早餐。',
+        '多喝水，乖。',
+        '下班报平安。',
+        '空调别太低。',
+        '袜子要厚哦。',
+        // 新增祝福与鼓励话语
+        '记得开心。',
+        '天天开心。',
+        '天天快乐。',
+        '暴富富。',
+        '赚钱钱。',
+        '事业顺风祐顺水。',
+        '业绩满满。',
+        '业绩长虹。',
+        '记得想我。',
+        '多穿衣服。',
+        '注意安全。',
+        '按时睡觉。',
+        '多喝水。',
+        '我想你了。',
+        '要爱自己。',
+        '记得吃水果。',
+        '别太累了。',
+        '记得游戏。',
+        '好好保护自己。',
+        '不要生病。'
+      ];
+      function pickPhrase(){ return PHRASES[(Math.random()*PHRASES.length)|0]; }
+
+      // 文本标签：在爆炸中心短暂显示，微微上浮且淡出
+      class TextLabel{
+        constructor(x,y,color,fontSize,life,text, w, h, alphaMul=1.0){
+          this.x=x; this.y=y; this.color=color; this.fontSize=fontSize; this.life=life; this.maxLife=life; this.text=text; this.vy=-0.15;
+          this.w=w; this.h=h; this.alphaMul=alphaMul;
+        }
+        update(){ this.y += this.vy; this.life -= 1; }
+        draw(){
+          const alpha = Math.max(0, this.life/this.maxLife);
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = Math.min(1, (0.9*alpha + 0.1) * (this.alphaMul||1));
+          ctx.font = `300 ${this.fontSize}px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.shadowColor = this.color; ctx.shadowBlur = 3;
+          ctx.fillStyle = this.color;
+          // 前景遮挡区域内不绘制文本
+          const m = window.fwMaskRect;
+          if (!(m && this.x >= m.x && this.x <= m.x+m.w && this.y >= m.y && this.y <= m.y+m.h)){
+            ctx.fillText(this.text, this.x, this.y);
+          }
+          ctx.restore();
+        }
+      }
+      // 辅助：估算文本尺寸
+      function estimateTextSize(text, fontSize){
+        ctx.save();
+        ctx.font = `300 ${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
+        const metrics = ctx.measureText(text);
+        const w = metrics.width;
+        const h = Math.round(fontSize * 1.15);
+        ctx.restore();
+        return {w,h};
+      }
+      function rectsOverlap(a,b, margin=6){
+        return !(a.x + a.w + margin < b.x || b.x + b.w + margin < a.x || a.y + a.h + margin < b.y || b.y + b.h + margin < a.y);
+      }
+      function canPlaceLabel(x,y,w,h){
+        const bbox = {x:x - w/2, y:y - h/2, w, h};
+        for (let i=0;i<textLabels.length;i++){
+          const t = textLabels[i];
+          const tw = t.w || Math.max(10, t.fontSize * (t.text?.length||3) * 0.6);
+          const th = t.h || Math.round(t.fontSize * 1.15);
+          const tb = {x: t.x - tw/2, y: t.y - th/2, w: tw, h: th};
+          if (rectsOverlap(bbox, tb, 6)) return false;
+        }
+        return true;
+      }
+      function placeTextLabel(cx, cy, color, fontSize, life, text){
+        const W = (cvs.width/dpi), H = (cvs.height/dpi);
+        const {w,h} = estimateTextSize(text, fontSize);
+        // 尝试在爆炸附近的多个偏移位置放置，避免与现有文本重叠
+        const dirs = [
+          {dx:0,dy:0}, {dx:1,dy:0}, {dx:-1,dy:0}, {dx:0,dy:-1}, {dx:0,dy:1},
+          {dx:1.2,dy:-0.6}, {dx:-1.2,dy:-0.6}, {dx:1.2,dy:0.6}, {dx:-1.2,dy:0.6}
+        ];
+        const step = Math.max(14, fontSize*0.9);
+        for (let r=0; r<=4; r++){
+          for (let i=0;i<dirs.length;i++){
+            const dx = dirs[i].dx * step * (1 + r*0.8);
+            const dy = dirs[i].dy * step * (1 + r*0.8);
+            let px = cx + dx, py = cy + dy;
+            // 边界约束，避免贴边
+            px = clamp(px, 8 + w/2, W - 8 - w/2);
+            py = clamp(py, 8 + h/2, H - 8 - h/2);
+            if (canPlaceLabel(px, py, w, h)){
+              textLabels.push(new TextLabel(px, py, color, fontSize, life, text, w, h));
+              return;
+            }
+          }
+        }
+        // 如果实在无法避免重叠，则在中心弱化显示，减少遮挡感
+        textLabels.push(new TextLabel(cx, cy, color, fontSize, Math.round(life*0.8), text, w, h, 0.7));
+      }
+      const textLabels=[];
+      const rockets=[]; const particles=[];
+      // 覆盖点队列：确保每个角落与边缘都能被照顾到
+      const coveragePoints = [
+        {x:0.10,y:0.18}, {x:0.90,y:0.18},
+        {x:0.10,y:0.50}, {x:0.90,y:0.50},
+        {x:0.10,y:0.82}, {x:0.90,y:0.82},
+        {x:0.50,y:0.18}, {x:0.50,y:0.82},
+        {x:0.30,y:0.33}, {x:0.70,y:0.67},
+        {x:0.30,y:0.67}, {x:0.70,y:0.33},
+        {x:0.50,y:0.50}
+      ];
+      let coverageIdx = 0;
+      function nextCoveragePoint(){ const p = coveragePoints[coverageIdx]; coverageIdx = (coverageIdx+1) % coveragePoints.length; return p; }
+      function maybeSecondary(p){ if(!p.canSecond) return; if(p.life < p.maxLife*0.5 && Math.random() < SECONDARY_CHANCE){ p.canSecond=false; const miniCount=Math.max(20, Math.round(EXP_COUNT*0.25)); const miniRadius=Math.max(60, Math.round(EXP_RADIUS*0.5)); const hue=Math.random(); for(let i=0;i<miniCount;i++){ const ang=Math.random()*Math.PI*2; const spd=rand(2.0,4.0); const vx=Math.cos(ang)*spd; const vy=Math.sin(ang)*spd - rand(0.1,0.4); const col=hsvToRgb((hue+rand(-0.08,0.08)+1)%1, rand(0.6,1.0), rand(0.85,1.0)); particles.push(new Particle(p.x, p.y, vx*(miniRadius/120), vy*(miniRadius/120), col, rand(0.9,1.6), rand(30,60))); } } }
+      // 自动随机发射：左右留边，避免贴边爆炸；更密集的连续多束
+      function randInt(min,max){ return (Math.random()* (max-min+1) | 0) + min; }
+      let autoT = 0, lastLaunch = 0; function autoLaunch(){
+        autoT++;
+        // 强度随时间渐增
+        intensity = clamp(autoT / RAMP_FRAMES, 0, 1);
+        // 暴露给 3D 动画主循环
+        window.fwIntensity = intensity;
+        // 发射间隔随强度缩短
+        const interval = Math.max(1, Math.round(lerp(22, 6, intensity) / SPEED_MUL));
+        if ((autoT - lastLaunch) >= interval){
+          lastLaunch = autoT;
+          const maxN = Math.round(lerp(8, 16, intensity));
+          const n = randInt(2, maxN);
+          for(let i=0;i<n;i++){
+            const cp = nextCoveragePoint();
+            const W = (cvs.width/dpi), H = (cvs.height/dpi);
+            const jitterX = rand(-W*0.03, W*0.03);
+            const jitterY = rand(-H*0.04, H*0.04);
+            const x = cp.x * W + jitterX;
+            const burstY = clamp(cp.y * H + jitterY, H*0.12, H*0.88);
+            rockets.push(new Rocket(x, 'bottom', { burstY }));
+          }
+        }
+        // 额外补充随机发射，保证“接连不断”的观感
+        const extraProb = lerp(0.18, 0.38, intensity);
+        if (Math.random() < extraProb){
+          const cp = nextCoveragePoint();
+          const W = (cvs.width/dpi), H = (cvs.height/dpi);
+          const jitterX = rand(-W*0.03, W*0.03);
+          const jitterY = rand(-H*0.04, H*0.04);
+          const x = cp.x * W + jitterX;
+          const burstY = clamp(cp.y * H + jitterY, H*0.12, H*0.88);
+          rockets.push(new Rocket(x, 'bottom', { burstY }));
+        }
+      }
+      // 背景：由许多渐变色小爱心组成的大字“记得好好爱自己”，在爱心彻底消失后呈现
+      const heartsBackdrop=[]; let heartsBackdropPrepared=false;
+      function prepareHeartsBackdrop(){
+        const W = (cvs.width/dpi), H = (cvs.height/dpi);
+        const off = document.createElement('canvas'); off.width = W; off.height = H; const o = off.getContext('2d');
+        // 字体再大一些，清晰可读
+        const fontSize = Math.round(Math.min(W,H) * 0.40);
+        o.clearRect(0,0,W,H);
+        o.fillStyle = '#fff'; o.textAlign='center'; o.textBaseline='middle'; o.font = `900 ${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
+        // 两行：第一行“记得”，第二行“好好爱自己”
+        const lines = ['记得', '好好爱自己'];
+        const lineGap = Math.round(fontSize * 1.28);
+        const centerY = H * 0.50;
+        const y1 = Math.round(centerY - lineGap/2);
+        const y2 = Math.round(centerY + lineGap/2);
+        o.fillText(lines[0], W*0.50, y1);
+        o.fillText(lines[1], W*0.50, y2);
+        const img = o.getImageData(0,0,W,H).data;
+        // 更紧密更连续：进一步减小步长并提高抽样比例
+        const step = Math.max(6, Math.round(fontSize * 0.065));
+        for(let y=0;y<H;y+=step){
+          for(let x=0;x<W;x+=step){
+            const a = img[((y|0)*W + (x|0))*4 + 3];
+            if (a > 128 && Math.random() < 0.92){
+              // 爱心更小一些，颜色严格使用“蓝→紫→粉→金”渐变
+              const size = rand(2, 4);
+              const color = paletteFor(x/W, y/H);
+              // 轻微抖动，避免明显网格感
+              const jx = clamp(x + rand(-step*0.15, step*0.15), 0, W);
+              const jy = clamp(y + rand(-step*0.15, step*0.15), 0, H);
+              heartsBackdrop.push({x: jx, y: jy, size, color});
+            }
+          }
+        }
+        heartsBackdropPrepared = true;
+      }
+      function drawSmallHeart(x,y,size,color){
+        ctx.save(); ctx.translate(x,y); const s = size/16; ctx.scale(s, -s); // 反转Y使心形正立
+        ctx.beginPath();
+        for(let i=0;i<60;i++){ const t=(i/60)*Math.PI*2; const hp=heartPoint(t); if(i===0) ctx.moveTo(hp.x, hp.y); else ctx.lineTo(hp.x, hp.y); }
+        ctx.closePath(); ctx.globalCompositeOperation='lighter'; ctx.globalAlpha=0.95; ctx.fillStyle=color; ctx.fill(); ctx.restore();
+      }
+      function drawHeartsBackdrop(){
+        for(let i=0;i<heartsBackdrop.length;i++){
+          const h = heartsBackdrop[i]; drawSmallHeart(h.x, h.y, h.size, h.color);
+        }
+      }
+      function step(){
+        const dispersed = (window.uDisperse||0) >= 0.995;
+        // 渐隐旧帧，形成拖影；爱心彻底消失后，加大淡化力度让粒子更快变淡
+        ctx.save(); ctx.globalCompositeOperation = 'destination-out';
+        ctx.fillStyle = dispersed ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.20)';
+        ctx.fillRect(0,0,cvs.width/dpi,cvs.height/dpi); ctx.restore();
+        if (dispersed && !heartsBackdropPrepared){ prepareHeartsBackdrop(); }
+        // 更新火箭
+        for(let i=rockets.length-1;i>=0;i--){ const r=rockets[i]; r.update(); if(r.shouldExplode()){ rockets.splice(i,1); const spawned=r.explode(); particles.push(...spawned); } }
+        // 更新粒子
+        for(let i=particles.length-1;i>=0;i--){
+          const p=particles[i]; p.update(); /* 二次爆炸已禁用 */
+          const m = window.fwMaskRect;
+          if (!(m && p.x >= m.x && p.x <= m.x+m.w && p.y >= m.y && p.y <= m.y+m.h)){
+            p.draw();
+          }
+          if(p.life<=0 || p.y > (cvs.height/dpi) + 40){ particles.splice(i,1); }
+        }
+        // 在文本标签之前绘制由小爱心组成的大字背景（仅在爱心完全消失后显示）
+        if (dispersed && heartsBackdropPrepared){ drawHeartsBackdrop(); }
+        // 更新文本标签
+        for(let i=textLabels.length-1;i>=0;i--){ const t=textLabels[i]; t.update(); t.draw(); if (t.life<=0){ textLabels.splice(i,1); } }
+        // 删除“立冬快乐”最终竖排祝福，按用户要求不再显示该段文字
+        autoLaunch(); requestAnimationFrame(step);
+      }
+      step();
+    })();
+  </script>
+</body>
+</html>
+      // 连接层：直接从底座向心形扩散（不再经过中间 gate）
+      for (let i=0;i<CONNECT_COUNT;i++){
+        const px = connPos[i*3+0], py = connPos[i*3+1], pz = connPos[i*3+2];
+        const tx = connTgt[i*3+0], ty = connTgt[i*3+1], tz = connTgt[i*3+2];
+        {
+          // 向心形目标扩散前进，伴随较弱旋涡
+          const dx = tx - px, dy = ty - py, dz = tz - pz;
+          connVel[i*3+0] = (connVel[i*3+0] + dx*ATTRACT_CONN2) * DAMP_CONN;
+          connVel[i*3+1] = (connVel[i*3+1] + dy*ATTRACT_CONN2 + 0.02) * DAMP_CONN;
+          connVel[i*3+2] = (connVel[i*3+2] + dz*ATTRACT_CONN2) * DAMP_CONN;
+          connAng[i] += dt*0.7;
+          connVel[i*3+0] += -Math.sin(connAng[i])*(SWIRL2*0.02*dt);
+          connVel[i*3+2] +=  Math.cos(connAng[i])*(SWIRL2*0.02*dt);
+          connPos[i*3+0] += connVel[i*3+0];
+          connPos[i*3+1] += connVel[i*3+1];
+          connPos[i*3+2] += connVel[i*3+2];
+          const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+          // 接近心形或到达心形下缘则重置为新的底座发射
+          if (dist < 10.0 || connPos[i*3+1] > HEART_Y - 8){
+            resetConn(i);
+          }
+        }
+      }
+      connGeom.attributes.position.needsUpdate = true;

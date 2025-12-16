@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>奶龙的樱花庭院 - 3D Voxel Art</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-family: sans-serif; font-size: 24px; font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3); pointer-events: none; transition: opacity 0.5s;
+        }
+    </style>
+    
+    <!-- Import Map: 告诉浏览器去哪里下载 Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="loading">正在构建体素世界...</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { SimplexNoise } from 'three/addons/math/SimplexNoise.js';
+
+        // --- 1. 场景初始化 ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // 天空蓝
+        scene.fog = new THREE.Fog(0x87CEEB, 40, 90); // 雾气增加景深感
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(35, 35, 35); // 初始相机位置
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true; // 开启阴影
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // --- 2. 灯光设置 ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const sunLight = new THREE.DirectionalLight(0xffdfba, 1.2); // 暖色阳光
+        sunLight.position.set(50, 80, 30);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.width = 2048;
+        sunLight.shadow.mapSize.height = 2048;
+        sunLight.shadow.camera.near = 0.5;
+        sunLight.shadow.camera.far = 200;
+        sunLight.shadow.camera.left = -50;
+        sunLight.shadow.camera.right = 50;
+        sunLight.shadow.camera.top = 50;
+        sunLight.shadow.camera.bottom = -50;
+        scene.add(sunLight);
+
+        // --- 3. 控制器 ---
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 1.0;
+        controls.target.set(0, 5, 0);
+
+        // --- 4. 体素构建核心系统 ---
+        // 为了性能，我们不一个个创建Mesh，而是按颜色分类存储坐标，最后合并渲染
+        const voxelData = {}; 
+        const geometry = new THREE.BoxGeometry(1, 1, 1);
+
+        function addVoxel(x, y, z, colorHex) {
+            if (!voxelData[colorHex]) {
+                voxelData[colorHex] = [];
+            }
+            // 简单的去重（覆盖）逻辑，后画的覆盖先画的
+            // 这里为了性能简化，不做严格去重，直接添加
+            voxelData[colorHex].push({x, y, z});
+        }
+
+        // 批量渲染函数
+        function renderVoxels() {
+            const rootGroup = new THREE.Group();
+            
+            for (const [colorHex, positions] of Object.entries(voxelData)) {
+                const material = new THREE.MeshStandardMaterial({ 
+                    color: parseInt(colorHex),
+                    roughness: 0.8,
+                });
+                
+                const instancedMesh = new THREE.InstancedMesh(geometry, material, positions.length);
+                instancedMesh.castShadow = true;
+                instancedMesh.receiveShadow = true;
+
+                const dummy = new THREE.Object3D();
+                for (let i = 0; i < positions.length; i++) {
+                    const pos = positions[i];
+                    dummy.position.set(pos.x, pos.y, pos.z);
+                    dummy.updateMatrix();
+                    instancedMesh.setMatrixAt(i, dummy.matrix);
+                }
+                
+                rootGroup.add(instancedMesh);
+            }
+            scene.add(rootGroup);
+            document.getElementById('loading').style.opacity = 0;
+        }
+
+        // --- 5. 场景构建逻辑 (画笔) ---
+
+        // 调色板
+        const PALETTE = {
+            GRASS_LIGHT: 0x7cfc00, GRASS_DARK: 0x32cd32,
+            DIRT: 0x8b4513, STONE: 0x808080, STONE_DARK: 0x696969,
+            WATER: 0x4fc3f7, WATER_DEEP: 0x0288d1,
+            WOOD: 0x8B5A2B, WOOD_DARK: 0x5C4033,
+            LEAVES_GREEN: 0x228B22, SAKURA: 0xffb7c5, SAKURA_DARK: 0xff9eb5,
+            RED: 0xd32f2f, GOLD: 0xffd700,
+            // 奶龙颜色
+            DRAGON_BODY: 0xfffdd0, // 奶黄色
+            DRAGON_BELLY: 0xffecb3, 
+            DRAGON_CHEEK: 0xffaeb9,
+            BLACK: 0x1a1a1a
+        };
+
+        // 辅助：画圆球/椭球
+        function drawEllipsoid(cx, cy, cz, rx, ry, rz, color) {
+            for(let x = -rx; x <= rx; x++) {
+                for(let y = -ry; y <= ry; y++) {
+                    for(let z = -rz; z <= rz; z++) {
+                        if ((x*x)/(rx*rx) + (y*y)/(ry*ry) + (z*z)/(rz*rz) <= 1.0) {
+                            addVoxel(cx + x, cy + y, cz + z, color);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 辅助：画盒子
+        function drawBox(x, y, z, w, h, d, color) {
+            for(let i=0; i<w; i++)
+            for(let j=0; j<h; j++)
+            for(let k=0; k<d; k++)
+                addVoxel(x+i, y+j, z+k, color);
+        }
+
+        // --- 5.1 构建地形 ---
+        const mapSize = 40;
+        for (let x = -mapSize; x <= mapSize; x++) {
+            for (let z = -mapSize; z <= mapSize; z++) {
+                let y = 0;
+                
+                // 创造一些起伏
+                const dist = Math.sqrt(x*x + z*z);
+                
+                // 池塘区域 (在左前方)
+                if (x > 5 && x < 20 && z > 5 && z < 25) {
+                    // 池塘底
+                    addVoxel(x, -2, z, PALETTE.DIRT);
+                    // 水面
+                    addVoxel(x, -1, z, (x+z)%2==0 ? PALETTE.WATER : PALETTE.WATER_DEEP);
+                    continue; // 只有水，没有草
+                }
+
+                // 小路 (S型弯道)
+                const pathCurve = Math.sin(x * 0.2) * 10;
+                const isPath = Math.abs(z - pathCurve) < 2.5;
+
+                if (isPath) {
+                    addVoxel(x, 0, z, Math.random()>0.5 ? PALETTE.STONE : PALETTE.STONE_DARK);
+                } else {
+                    // 草地
+                    const grassColor = (x + z) % 2 === 0 ? PALETTE.GRASS_LIGHT : PALETTE.GRASS_DARK;
+                    addVoxel(x, 0, z, grassColor);
+                    // 土层
+                    addVoxel(x, -1, z, PALETTE.DIRT);
+                    addVoxel(x, -2, z, PALETTE.DIRT);
+                    
+                    // 随机花朵和草丛
+                    if (Math.random() > 0.95 && dist > 8) {
+                        addVoxel(x, 1, z, Math.random()>0.5 ? PALETTE.LEAVES_GREEN : PALETTE.SAKURA); 
+                    }
+                }
+            }
+        }
+
+        // --- 5.2 构建奶龙 (主角) ---
+        function buildMilkDragon(x, y, z) {
+            // 身体 (胖胖的梨形)
+            drawEllipsoid(x, y+4, z, 5, 5, 5, PALETTE.DRAGON_BODY);
+            // 肚子 (稍微突起)
+            drawEllipsoid(x, y+3, z+3, 3, 3, 2, PALETTE.DRAGON_BELLY);
+            
+            // 头 (更大一点)
+            drawEllipsoid(x, y+9, z, 4.5, 4, 4.5, PALETTE.DRAGON_BODY);
+            
+            // 脸颊肉
+            addVoxel(x-3, y+8, z+3, PALETTE.DRAGON_CHEEK);
+            addVoxel(x+3, y+8, z+3, PALETTE.DRAGON_CHEEK);
+
+            // 眼睛
+            addVoxel(x-2, y+9, z+4, PALETTE.BLACK);
+            addVoxel(x+2, y+9, z+4, PALETTE.BLACK);
+            // 眼睛高光
+            addVoxel(x-1.8, y+9.2, z+4.2, 0xffffff);
+            addVoxel(x+2.2, y+9.2, z+4.2, 0xffffff);
+
+            // 短手
+            drawEllipsoid(x-5, y+5, z+1, 1.5, 1, 1, PALETTE.DRAGON_BODY); // 左手
+            drawEllipsoid(x+5, y+5, z+1, 1.5, 1, 1, PALETTE.DRAGON_BODY); // 右手
+
+            // 短腿 (坐着)
+            drawEllipsoid(x-3, y+1, z+3, 2, 1.5, 3, PALETTE.DRAGON_BODY);
+            drawEllipsoid(x+3, y+1, z+3, 2, 1.5, 3, PALETTE.DRAGON_BODY);
+
+            // 尾巴 (后面拖着)
+            drawEllipsoid(x, y+1, z-5, 2, 1, 3, PALETTE.DRAGON_BODY);
+            addVoxel(x, y+2, z-7, PALETTE.DRAGON_BODY);
+
+            // 背上的小翅膀/棘刺
+            addVoxel(x, y+6, z-4, PALETTE.GOLD);
+            addVoxel(x, y+8, z-4, PALETTE.GOLD);
+        }
+
+        buildMilkDragon(0, 0, 0);
+
+        // --- 5.3 构建环境物体 ---
+
+        // 樱花树生成器
+        function buildSakuraTree(cx, cz, height) {
+            // 树干
+            for(let y=0; y<height; y++) {
+                addVoxel(cx, y, cz, PALETTE.WOOD_DARK);
+                // 树干稍微粗一点
+                if(y < 3) {
+                    addVoxel(cx+1, y, cz, PALETTE.WOOD_DARK);
+                    addVoxel(cx, y, cz+1, PALETTE.WOOD_DARK);
+                    addVoxel(cx-1, y, cz, PALETTE.WOOD_DARK);
+                    addVoxel(cx, y, cz-1, PALETTE.WOOD_DARK);
+                }
+            }
+            
+            // 树冠 (云朵状)
+            const crownY = height - 2;
+            const r = 5;
+            for(let i=0; i<150; i++) {
+                const ox = Math.floor((Math.random()-0.5)*2*r);
+                const oy = Math.floor((Math.random()-0.5)*2*r*0.6);
+                const oz = Math.floor((Math.random()-0.5)*2*r);
+                // 颜色随机深浅粉
+                const col = Math.random() > 0.3 ? PALETTE.SAKURA : PALETTE.SAKURA_DARK;
+                // 稀疏分布
+                if (ox*ox + oy*oy + oz*oz < r*r) {
+                    addVoxel(cx+ox, crownY+oy+5, cz+oz, col);
+                    // 增加一些连通性
+                    addVoxel(cx+ox, crownY+oy+4, cz+oz, col);
+                }
+            }
+        }
+
+        // 放置几棵树
+        buildSakuraTree(-15, -15, 10);
+        buildSakuraTree(15, -20, 12);
+        buildSakuraTree(-20, 10, 9);
+        buildSakuraTree(25, 5, 11);
+
+        // 石灯笼
+        function buildLantern(x, z) {
+            drawBox(x, 0, z, 3, 2, 3, PALETTE.STONE); // 基座
+            drawBox(x+1, 2, z+1, 1, 4, 1, PALETTE.STONE); // 柱子
+            drawBox(x, 6, z, 3, 1, 3, PALETTE.STONE); // 平台
+            drawBox(x, 7, z, 3, 2, 3, 0xffeb3b); // 灯芯 (发光色)
+            drawBox(x-1, 9, z-1, 5, 1, 5, PALETTE.STONE_DARK); // 屋顶
+            addVoxel(x+1, 10, z+1, PALETTE.STONE_DARK); // 顶尖
+        }
+        buildLantern(12, 12);
+
+        // 小木桥
+        function buildBridge(startX, z, length) {
+            for(let i=0; i<length; i++) {
+                const x = startX + i;
+                const y = Math.sin((i/length) * Math.PI) * 2; // 拱形高度
+                const h = Math.floor(y);
+                
+                // 桥面
+                addVoxel(x, h+1, z, PALETTE.WOOD);
+                addVoxel(x, h+1, z+1, PALETTE.WOOD);
+                addVoxel(x, h+1, z+2, PALETTE.WOOD);
+                
+                // 栏杆
+                addVoxel(x, h+2, z, PALETTE.WOOD_DARK);
+                addVoxel(x, h+2, z+2, PALETTE.WOOD_DARK);
+            }
+        }
+        // 跨越池塘
+        buildBridge(5, 15, 14);
+
+        // 长椅
+        function buildBench(x, z, rotate) {
+            if (!rotate) {
+                drawBox(x, 1, z, 6, 1, 2, PALETTE.WOOD); // 座位
+                drawBox(x, 0, z, 1, 1, 2, PALETTE.WOOD_DARK); // 腿
+                drawBox(x+5, 0, z, 1, 1, 2, PALETTE.WOOD_DARK); // 腿
+                drawBox(x, 2, z, 6, 2, 1, PALETTE.WOOD); // 靠背
+            } else {
+                drawBox(x, 1, z, 2, 1, 6, PALETTE.WOOD);
+                drawBox(x, 0, z, 2, 1, 1, PALETTE.WOOD_DARK);
+                drawBox(x, 0, z+5, 2, 1, 1, PALETTE.WOOD_DARK);
+                drawBox(x, 2, z, 1, 2, 6, PALETTE.WOOD);
+            }
+        }
+        buildBench(-8, 8, false);
+
+        // --- 6. 渲染与动画 ---
+        renderVoxels(); // 构建并添加到场景
+
+        // 交互：点击暂停旋转
+        let isPaused = false;
+        window.addEventListener('mousedown', () => { controls.autoRotate = false; });
+        window.addEventListener('mouseup', () => { controls.autoRotate = true; });
+
+        // 窗口大小调整
+        window.addEventListener('resize', onWindowResize, false);
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        animate();
+    </script>
+</body>
+</html>

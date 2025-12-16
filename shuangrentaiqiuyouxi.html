@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>中式八球 - 双人对战版</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #222;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            font-family: "Microsoft YaHei", sans-serif;
+            user-select: none;
+        }
+
+        /* 游戏UI层 */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 50px;
+            box-sizing: border-box;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .player-card {
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 10px;
+            border: 2px solid #444;
+            transition: all 0.3s;
+        }
+
+        .player-card.active {
+            background: rgba(255, 215, 0, 0.2);
+            border-color: gold;
+            box-shadow: 0 0 15px rgba(255, 215, 0, 0.5);
+            transform: scale(1.1);
+        }
+
+        /* 游戏结束弹窗 */
+        #modal {
+            display: none;
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            z-index: 100;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+
+        #modal h1 { font-size: 48px; color: gold; margin-bottom: 20px; }
+        #modal button {
+            padding: 15px 40px;
+            font-size: 24px;
+            background: #d32f2f;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+        }
+        #modal button:hover { background: #b71c1c; }
+
+        /* 画布容器 */
+        #game-container {
+            position: relative;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+            border-radius: 20px;
+            border: 15px solid #5d4037; /* 木质边框颜色 */
+        }
+
+        canvas { display: block; border-radius: 5px; cursor: crosshair; }
+
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="p1-card" class="player-card active">
+            <h3>玩家 1</h3>
+            <div id="p1-status">花色：待定</div>
+        </div>
+        <div id="p2-card" class="player-card">
+            <h3>玩家 2</h3>
+            <div id="p2-status">花色：待定</div>
+        </div>
+    </div>
+
+    <div id="modal">
+        <h1 id="winner-text">玩家 1 获胜!</h1>
+        <button onclick="resetGame()">再来一局</button>
+    </div>
+
+    <div id="game-container">
+        <canvas id="poolTable"></canvas>
+    </div>
+
+    <script>
+        // === 1. 配置与常量 ===
+        const canvas = document.getElementById('poolTable');
+        const ctx = canvas.getContext('2d');
+
+        // 台球桌参数 (标准比例 2:1)
+        const TABLE_WIDTH = 900;
+        const TABLE_HEIGHT = 450;
+        const RAIL_SIZE = 30; // 库边宽度
+        canvas.width = TABLE_WIDTH + RAIL_SIZE * 2;
+        canvas.height = TABLE_HEIGHT + RAIL_SIZE * 2;
+
+        const BALL_RADIUS = 12;
+        const POCKET_RADIUS = 22;
+        const FRICTION = 0.985; // 摩擦力 (越小停得越快)
+        const POWER_MULTIPLIER = 0.6; // 力度系数
+        const MAX_POWER = 40; // 最大拉杆距离
+
+        // 颜色定义
+        const COLORS = {
+            TABLE: '#2e7d32', // 或者是 '#1b5e20'
+            RAIL: '#5d4037',
+            POCKET: '#000000',
+            WHITE: '#ffffff',
+            BLACK: '#000000',
+            YELLOW: '#fdd835',
+            BLUE: '#1e88e5',
+            RED: '#e53935',
+            PURPLE: '#8e24aa',
+            ORANGE: '#fb8c00',
+            GREEN: '#43a047',
+            MAROON: '#6d4c41'
+        };
+
+        const BALL_COLORS = [
+            COLORS.YELLOW, COLORS.BLUE, COLORS.RED, COLORS.PURPLE, 
+            COLORS.ORANGE, COLORS.GREEN, COLORS.MAROON
+        ];
+
+        // === 2. 全局变量 ===
+        let balls = [];
+        let cueBall;
+        let stick = { x: 0, y: 0, angle: 0, power: 0, isShooting: false, isAiming: true };
+        let currentPlayer = 1; // 1 or 2
+        let playerAssigned = { 1: null, 2: null }; // 'solid' or 'stripe'
+        let gameState = 'idle'; // 'idle', 'moving', 'gameover'
+        let firstHit = null; // 本回合撞到的第一个球
+        let pottedBalls = []; // 本回合进球列表
+
+        // === 3. 类定义 ===
+        class Ball {
+            constructor(x, y, id, isStripe = false) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.id = id; // 0=白球, 8=黑八, 1-7全色, 9-15半色
+                this.radius = BALL_RADIUS;
+                this.active = true;
+                this.inPocket = false;
+
+                // 确定颜色和花色
+                if (id === 0) {
+                    this.color = COLORS.WHITE;
+                    this.type = 'cue';
+                } else if (id === 8) {
+                    this.color = COLORS.BLACK;
+                    this.type = 'eight';
+                } else {
+                    let colorIdx = (id > 8 ? id - 9 : id - 1) % 7;
+                    this.color = BALL_COLORS[colorIdx];
+                    this.type = id > 8 ? 'stripe' : 'solid';
+                }
+            }
+
+            draw() {
+                if (!this.active) return;
+
+                ctx.save();
+                ctx.translate(this.x, this.y);
+
+                // 球体底色
+                ctx.beginPath();
+                ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = (this.type === 'stripe' || this.type === 'cue') ? '#fff' : this.color;
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // 绘制花纹
+                if (this.type === 'stripe') {
+                    ctx.beginPath();
+                    ctx.rect(-this.radius, -this.radius * 0.6, this.radius * 2, this.radius * 1.2);
+                    ctx.fillStyle = this.color;
+                    ctx.fill();
+                    ctx.clip(); // 裁剪，防止颜色画出球外
+                }
+
+                // 绘制数字圆圈 (白底)
+                if (this.id !== 0) {
+                    ctx.beginPath();
+                    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                    ctx.arc(0, 0, this.radius * 0.45, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // 数字
+                    ctx.fillStyle = '#000';
+                    ctx.font = 'bold 10px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(this.id, 0, 1);
+                }
+
+                // 简单的高光
+                ctx.beginPath();
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.arc(-this.radius*0.3, -this.radius*0.3, this.radius*0.2, 0, Math.PI*2);
+                ctx.fill();
+
+                ctx.restore();
+            }
+
+            update() {
+                if (!this.active) return;
+
+                // 移动
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // 摩擦力
+                this.vx *= FRICTION;
+                this.vy *= FRICTION;
+
+                // 停止阈值
+                if (Math.abs(this.vx) < 0.05 && Math.abs(this.vy) < 0.05) {
+                    this.vx = 0;
+                    this.vy = 0;
+                }
+
+                // 库边碰撞 (反弹)
+                // 左
+                if (this.x < RAIL_SIZE + this.radius) {
+                    this.x = RAIL_SIZE + this.radius;
+                    this.vx *= -0.8;
+                }
+                // 右
+                if (this.x > canvas.width - RAIL_SIZE - this.radius) {
+                    this.x = canvas.width - RAIL_SIZE - this.radius;
+                    this.vx *= -0.8;
+                }
+                // 上
+                if (this.y < RAIL_SIZE + this.radius) {
+                    this.y = RAIL_SIZE + this.radius;
+                    this.vy *= -0.8;
+                }
+                // 下
+                if (this.y > canvas.height - RAIL_SIZE - this.radius) {
+                    this.y = canvas.height - RAIL_SIZE - this.radius;
+                    this.vy *= -0.8;
+                }
+            }
+        }
+
+        // === 4. 游戏逻辑核心 ===
+
+        function initGame() {
+            balls = [];
+            
+            // 1. 放置白球
+            cueBall = new Ball(RAIL_SIZE + TABLE_WIDTH * 0.25, RAIL_SIZE + TABLE_HEIGHT / 2, 0);
+            balls.push(cueBall);
+
+            // 2. 放置目标球 (三角形摆放)
+            // 1: 全, 2-7 全, 8 黑, 9-15 半
+            // 摆球顺序是个大学问，这里简单摆放，保证8在中间
+            const startX = RAIL_SIZE + TABLE_WIDTH * 0.75;
+            const startY = RAIL_SIZE + TABLE_HEIGHT / 2;
+            const rows = 5;
+            let count = 0;
+            
+            // 简单的ID映射，确保8号在中间(第3排中间)
+            // 布局：
+            // 1
+            // 9 2
+            // 3 8 10
+            // 11 4 12 5
+            // 6 13 7 14 15
+            const layout = [
+                1, 
+                9, 2,
+                3, 8, 10,
+                11, 4, 12, 5,
+                6, 13, 7, 14, 15
+            ];
+
+            let idx = 0;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c <= r; c++) {
+                    let x = startX + r * (BALL_RADIUS * 2 * 0.866); // sqrt(3)/2
+                    let y = startY - (r * BALL_RADIUS) + (c * BALL_RADIUS * 2);
+                    balls.push(new Ball(x, y, layout[idx++]));
+                }
+            }
+
+            currentPlayer = 1;
+            playerAssigned = { 1: null, 2: null };
+            updateUI();
+            gameState = 'idle';
+            document.getElementById('modal').style.display = 'none';
+        }
+
+        // 碰撞检测与处理
+        function checkCollisions() {
+            // 球与球
+            for (let i = 0; i < balls.length; i++) {
+                for (let j = i + 1; j < balls.length; j++) {
+                    let b1 = balls[i];
+                    let b2 = balls[j];
+
+                    if (!b1.active || !b2.active) continue;
+
+                    let dx = b2.x - b1.x;
+                    let dy = b2.y - b1.y;
+                    let dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist < b1.radius + b2.radius) {
+                        // 记录第一撞击
+                        if (gameState === 'moving' && firstHit === null) {
+                            if (b1.id === 0) firstHit = b2;
+                            if (b2.id === 0) firstHit = b1;
+                        }
+
+                        // 物理碰撞响应 (弹性碰撞)
+                        let angle = Math.atan2(dy, dx);
+                        let sin = Math.sin(angle);
+                        let cos = Math.cos(angle);
+
+                        // 旋转速度
+                        let vx1 = b1.vx * cos + b1.vy * sin;
+                        let vy1 = b1.vy * cos - b1.vx * sin;
+                        let vx2 = b2.vx * cos + b2.vy * sin;
+                        let vy2 = b2.vy * cos - b2.vx * sin;
+
+                        // 交换x方向速度
+                        let temp = vx1;
+                        vx1 = vx2;
+                        vx2 = temp;
+
+                        // 防止重叠 (推开)
+                        let overlap = (b1.radius + b2.radius - dist) / 2;
+                        b1.x -= overlap * Math.cos(angle);
+                        b1.y -= overlap * Math.sin(angle);
+                        b2.x += overlap * Math.cos(angle);
+                        b2.y += overlap * Math.sin(angle);
+
+                        // 转回原坐标系
+                        b1.vx = vx1 * cos - vy1 * sin;
+                        b1.vy = vy1 * cos + vx1 * sin;
+                        b2.vx = vx2 * cos - vy2 * sin;
+                        b2.vy = vy2 * cos + vx2 * sin;
+                    }
+                }
+            }
+
+            // 球进袋
+            const pockets = [
+                {x: RAIL_SIZE, y: RAIL_SIZE}, // 左上
+                {x: canvas.width/2, y: RAIL_SIZE - 5}, // 中上
+                {x: canvas.width-RAIL_SIZE, y: RAIL_SIZE}, // 右上
+                {x: RAIL_SIZE, y: canvas.height-RAIL_SIZE}, // 左下
+                {x: canvas.width/2, y: canvas.height-RAIL_SIZE + 5}, // 中下
+                {x: canvas.width-RAIL_SIZE, y: canvas.height-RAIL_SIZE} // 右下
+            ];
+
+            balls.forEach(b => {
+                if (!b.active) return;
+                pockets.forEach(p => {
+                    let dx = b.x - p.x;
+                    let dy = b.y - p.y;
+                    if (Math.sqrt(dx*dx + dy*dy) < POCKET_RADIUS) {
+                        b.active = false;
+                        b.inPocket = true;
+                        pottedBalls.push(b);
+                    }
+                });
+            });
+        }
+
+        // 游戏循环
+        function loop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 绘制球桌
+            drawTable();
+
+            // 逻辑更新
+            let isMoving = false;
+            balls.forEach(b => {
+                if(b.active && (Math.abs(b.vx) > 0 || Math.abs(b.vy) > 0)) isMoving = true;
+                b.update();
+            });
+
+            if (gameState === 'moving') {
+                checkCollisions();
+                if (!isMoving) {
+                    // 所有球停下来了，结算回合
+                    handleTurnEnd();
+                }
+            }
+
+            // 绘制球
+            // 先画普通球，后画白球确保白球在上面
+            balls.forEach(b => { if(b.id !== 0) b.draw(); });
+            if(cueBall.active) cueBall.draw();
+
+            // 绘制球杆 (只有在闲置且白球在场时)
+            if (gameState === 'idle' && cueBall.active) {
+                drawStick();
+            }
+
+            requestAnimationFrame(loop);
+        }
+
+        // 绘制球桌
+        function drawTable() {
+            // 边框
+            ctx.fillStyle = COLORS.RAIL;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 台面
+            ctx.fillStyle = COLORS.TABLE;
+            ctx.fillRect(RAIL_SIZE, RAIL_SIZE, TABLE_WIDTH, TABLE_HEIGHT);
+
+            // 袋口
+            ctx.fillStyle = COLORS.POCKET;
+            const pockets = [
+                [RAIL_SIZE, RAIL_SIZE],
+                [canvas.width/2, RAIL_SIZE-5],
+                [canvas.width-RAIL_SIZE, RAIL_SIZE],
+                [RAIL_SIZE, canvas.height-RAIL_SIZE],
+                [canvas.width/2, canvas.height-RAIL_SIZE+5],
+                [canvas.width-RAIL_SIZE, canvas.height-RAIL_SIZE]
+            ];
+            pockets.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p[0], p[1], POCKET_RADIUS, 0, Math.PI*2);
+                ctx.fill();
+            });
+        }
+
+        // 绘制球杆与瞄准线
+        function drawStick() {
+            const dx = stick.x - cueBall.x;
+            const dy = stick.y - cueBall.y;
+            const angle = Math.atan2(dy, dx);
+
+            ctx.save();
+            ctx.translate(cueBall.x, cueBall.y);
+            ctx.rotate(angle);
+
+            // 1. 瞄准辅助线 (虚线)
+            ctx.beginPath();
+            ctx.setLineDash([5, 5]);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.moveTo(0, 0);
+            ctx.lineTo(-400, 0); // 反向延伸
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // 2. 球杆本体
+            // 计算蓄力偏移
+            let offset = 20 + stick.power * 2; 
+            
+            // 杆头
+            ctx.fillStyle = '#fdd835'; // 铜头
+            ctx.fillRect(offset, -3, 5, 6);
+            
+            // 前节 (浅木色)
+            ctx.fillStyle = '#d7ccc8';
+            ctx.fillRect(offset + 5, -4, 150, 8);
+            
+            // 后把 (深色)
+            ctx.fillStyle = '#3e2723';
+            ctx.fillRect(offset + 155, -5, 200, 10);
+
+            // 力度条 (在球杆上方显示)
+            if (stick.isShooting) {
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
+                ctx.fillRect(offset, -15, stick.power * 2, 5);
+            }
+
+            ctx.restore();
+        }
+
+        // === 5. 交互控制 ===
+        canvas.addEventListener('mousemove', e => {
+            if (gameState !== 'idle') return;
+            const rect = canvas.getBoundingClientRect();
+            stick.x = e.clientX - rect.left;
+            stick.y = e.clientY - rect.top;
+            
+            // 如果正在蓄力，更新力度
+            if (stick.isShooting) {
+                const dx = stick.x - cueBall.x;
+                const dy = stick.y - cueBall.y;
+                let dist = Math.sqrt(dx*dx + dy*dy);
+                // 简单计算：鼠标离球越远，力度越大，但只限制在反向区域不好做
+                // 这里简化为：按下瞬间记录距离，拉远增加力度，这里先简化为距离白球的距离
+                let power = Math.min(dist / 3, MAX_POWER);
+                if(power < 5) power = 0;
+                stick.power = power;
+            }
+        });
+
+        canvas.addEventListener('mousedown', e => {
+            if (gameState !== 'idle') return;
+            stick.isShooting = true;
+        });
+
+        canvas.addEventListener('mouseup', e => {
+            if (gameState !== 'idle' || !stick.isShooting) return;
+            
+            if (stick.power > 5) {
+                shoot();
+            }
+            stick.isShooting = false;
+            stick.power = 0;
+        });
+
+        function shoot() {
+            gameState = 'moving';
+            pottedBalls = [];
+            firstHit = null;
+
+            const dx = stick.x - cueBall.x;
+            const dy = stick.y - cueBall.y;
+            const angle = Math.atan2(dy, dx);
+
+            // 反向击球
+            cueBall.vx = -Math.cos(angle) * stick.power * POWER_MULTIPLIER;
+            cueBall.vy = -Math.sin(angle) * stick.power * POWER_MULTIPLIER;
+        }
+
+        // === 6. 规则判定 ===
+
+        function handleTurnEnd() {
+            let isFoul = false;
+            let turnContinues = false;
+            let gameWon = false;
+            let gameLost = false;
+
+            // 1. 检查白球
+            const cueBallPotted = pottedBalls.find(b => b.id === 0);
+            if (cueBallPotted) {
+                isFoul = true;
+                cueBall.active = true;
+                cueBall.vx = 0; cueBall.vy = 0;
+                cueBall.x = RAIL_SIZE + TABLE_WIDTH * 0.25; // 摆回开球线
+                cueBall.y = RAIL_SIZE + TABLE_HEIGHT / 2;
+            }
+
+            // 2. 检查黑八
+            const eightBallPotted = pottedBalls.find(b => b.id === 8);
+            if (eightBallPotted) {
+                // 如果黑八进了
+                if (isFoul) {
+                    // 白球也进了，或者犯规时进黑八 -> 输
+                    gameLost = true;
+                } else {
+                    // 检查当前玩家是否已经清空了自己的球
+                    const myType = playerAssigned[currentPlayer];
+                    if (!myType) {
+                        // 还没分花色就打进黑八 -> 输 (开局直接进除外，这里简化为输)
+                        gameLost = true; 
+                    } else {
+                        const remainingMine = balls.filter(b => b.active && b.type === myType && b.id !== 8);
+                        if (remainingMine.length === 0) {
+                            gameWon = true; // 正常获胜
+                        } else {
+                            gameLost = true; // 还没打完就进黑八 -> 输
+                        }
+                    }
+                }
+            }
+
+            // 3. 判定花色归属
+            if (!playerAssigned[1] && !isFoul && !gameLost && !gameWon) {
+                // 寻找第一个进的目标球
+                const firstPot = pottedBalls.find(b => b.id !== 0 && b.id !== 8);
+                if (firstPot) {
+                    if (currentPlayer === 1) {
+                        playerAssigned[1] = firstPot.type;
+                        playerAssigned[2] = firstPot.type === 'solid' ? 'stripe' : 'solid';
+                    } else {
+                        playerAssigned[2] = firstPot.type;
+                        playerAssigned[1] = firstPot.type === 'solid' ? 'stripe' : 'solid';
+                    }
+                }
+            }
+
+            // 4. 判定是否继续击球
+            if (!isFoul && !gameLost && !gameWon) {
+                const myType = playerAssigned[currentPlayer];
+                const validPot = pottedBalls.find(b => {
+                    if (b.id === 0 || b.id === 8) return false;
+                    if (!myType) return true; // 还没分花色，只要进球就继续
+                    return b.type === myType;
+                });
+
+                if (validPot) {
+                    turnContinues = true;
+                }
+            }
+
+            // 结算
+            if (gameWon) {
+                gameOver(currentPlayer);
+            } else if (gameLost) {
+                gameOver(currentPlayer === 1 ? 2 : 1);
+            } else {
+                gameState = 'idle';
+                if (!turnContinues || isFoul) {
+                    currentPlayer = currentPlayer === 1 ? 2 : 1;
+                }
+                updateUI();
+            }
+        }
+
+        function updateUI() {
+            const p1Card = document.getElementById('p1-card');
+            const p2Card = document.getElementById('p2-card');
+            const p1Text = document.getElementById('p1-status');
+            const p2Text = document.getElementById('p2-status');
+
+            if (currentPlayer === 1) {
+                p1Card.classList.add('active');
+                p2Card.classList.remove('active');
+            } else {
+                p1Card.classList.remove('active');
+                p2Card.classList.add('active');
+            }
+
+            const typeMap = { 'solid': '全色 (1-7)', 'stripe': '半色 (9-15)', null: '待定' };
+            p1Text.innerText = `花色：${typeMap[playerAssigned[1]]}`;
+            p2Text.innerText = `花色：${typeMap[playerAssigned[2]]}`;
+        }
+
+        function gameOver(winnerId) {
+            gameState = 'gameover';
+            document.getElementById('winner-text').innerText = `玩家 ${winnerId} 获胜!`;
+            document.getElementById('modal').style.display = 'flex';
+        }
+
+        function resetGame() {
+            initGame();
+            loop();
+        }
+
+        // 启动
+        initGame();
+        loop();
+
+    </script>
+</body>
+</html>

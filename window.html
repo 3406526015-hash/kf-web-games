@@ -1,0 +1,655 @@
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HyperOS Web Edition</title>
+    <style>
+        /* --- 系统级 CSS --- */
+        :root {
+            --bg-color: #0f172a;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --glass: rgba(30, 41, 59, 0.7);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --text: #e2e8f0;
+            --taskbar-height: 48px;
+        }
+        
+        * { box-sizing: border-box; user-select: none; }
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; overflow: hidden; background: #000; color: var(--text); height: 100vh; }
+        
+        /* 启动屏幕 */
+        #boot-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; z-index: 9999; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; color: white;
+            transition: opacity 1s;
+        }
+        .loader {
+            border: 4px solid #333; border-top: 4px solid var(--accent);
+            border-radius: 50%; width: 50px; height: 50px;
+            animation: spin 1s linear infinite; margin-bottom: 20px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* 桌面环境 */
+        #desktop {
+            position: absolute; top: 0; left: 0; width: 100%; height: calc(100% - var(--taskbar-height));
+            background: url('https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=2072&auto=format&fit=crop') center/cover no-repeat;
+            z-index: 1; transition: filter 0.3s;
+        }
+
+        /* 图标网格 */
+        .desktop-icons {
+            display: flex; flex-direction: column; flex-wrap: wrap;
+            height: 100%; width: 300px; padding: 10px; gap: 10px;
+        }
+        .icon {
+            width: 80px; height: 90px; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; cursor: pointer;
+            border-radius: 5px; transition: 0.2s; color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+        }
+        .icon:hover { background: rgba(255,255,255,0.1); }
+        .icon-img { font-size: 40px; margin-bottom: 5px; }
+        .icon-label { font-size: 12px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
+
+        /* 窗口系统 */
+        .window {
+            position: absolute; background: #1e293b; border-radius: 8px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            border: 1px solid var(--glass-border);
+            display: flex; flex-direction: column; overflow: hidden;
+            min-width: 200px; min-height: 150px;
+            animation: popIn 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        
+        .win-header {
+            height: 30px; background: rgba(0,0,0,0.2); display: flex;
+            align-items: center; justify-content: space-between; padding: 0 10px;
+            cursor: default;
+        }
+        .win-title { font-size: 12px; opacity: 0.8; display: flex; align-items: center; gap: 5px; }
+        .win-controls { display: flex; gap: 8px; }
+        .win-btn { width: 12px; height: 12px; border-radius: 50%; cursor: pointer; }
+        .win-close { background: #ff5f56; } .win-min { background: #ffbd2e; } .win-max { background: #27c93f; }
+
+        .win-content { flex: 1; overflow: auto; position: relative; background: #0f172a; }
+        .resizer { width: 10px; height: 10px; position: absolute; bottom: 0; right: 0; cursor: se-resize; }
+
+        /* 任务栏 */
+        #taskbar {
+            position: absolute; bottom: 0; width: 100%; height: var(--taskbar-height);
+            background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(12px);
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 15px; z-index: 10000; border-top: 1px solid var(--glass-border);
+        }
+        #start-btn { 
+            font-size: 24px; padding: 5px 10px; cursor: pointer; border-radius: 4px; transition: 0.2s;
+        }
+        #start-btn:hover { background: rgba(255,255,255,0.1); }
+        .taskbar-apps { display: flex; gap: 5px; flex: 1; margin-left: 10px; }
+        .task-icon {
+            width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+            font-size: 20px; border-radius: 4px; cursor: pointer; position: relative;
+        }
+        .task-icon:hover { background: rgba(255,255,255,0.1); }
+        .task-icon.active::after {
+            content: ''; position: absolute; bottom: 2px; width: 15px; height: 3px;
+            background: var(--accent); border-radius: 2px;
+        }
+        #clock { font-size: 12px; text-align: right; cursor: default; }
+
+        /* 开始菜单 */
+        #start-menu {
+            position: absolute; bottom: 55px; left: 10px; width: 320px; height: 400px;
+            background: rgba(30, 41, 59, 0.95); backdrop-filter: blur(20px);
+            border-radius: 8px; border: 1px solid var(--glass-border);
+            display: none; flex-direction: column; padding: 20px; z-index: 9999;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #start-menu.visible { display: flex; animation: slideUp 0.2s ease-out; }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .start-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-top: 20px; }
+
+        /* App Specific Styles */
+        /* Terminal */
+        .terminal-body { background: #0c0c0c; color: #0f0; font-family: 'Consolas', monospace; padding: 10px; height: 100%; font-size: 14px; overflow-y: auto; }
+        .prompt { color: #0f0; margin-right: 5px; }
+        .cmd-input { background: transparent; border: none; color: #fff; outline: none; width: 80%; font-family: inherit; }
+        
+        /* Notepad */
+        .notepad-area { width: 100%; height: 100%; background: #1e1e1e; color: #fff; border: none; padding: 10px; outline: none; resize: none; font-family: sans-serif; }
+        
+        /* File Explorer */
+        .explorer-body { display: flex; height: 100%; }
+        .sidebar { width: 100px; background: #111; border-right: 1px solid #333; padding: 10px; font-size: 12px; }
+        .file-area { flex: 1; padding: 10px; display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; }
+        .file-item { width: 70px; text-align: center; cursor: pointer; }
+        .file-item:hover { background: #333; border-radius: 4px; }
+
+        /* Paint */
+        .paint-tools { height: 30px; background: #333; display: flex; align-items: center; gap: 10px; padding: 0 10px; }
+        .color-picker { width: 20px; height: 20px; border: none; padding: 0; }
+        canvas { background: white; cursor: crosshair; display: block; }
+
+        /* Code Editor */
+        .code-lines { float: left; width: 30px; background: #1e1e1e; color: #555; text-align: right; padding-right: 5px; font-family: monospace; font-size: 14px; line-height: 1.5; }
+        .code-area { width: calc(100% - 30px); height: 100%; background: #252526; color: #d4d4d4; border: none; outline: none; padding: 0 5px; font-family: 'Consolas', monospace; font-size: 14px; line-height: 1.5; resize: none; }
+
+        /* BSOD */
+        #bsod { display: none; position: fixed; top:0; left:0; width:100%; height:100%; background: #0078d7; color: white; padding: 100px; font-family: 'Segoe UI', sans-serif; z-index: 99999; }
+        
+        /* Video Editor */
+        .timeline { height: 30%; background: #111; border-top: 1px solid #333; display: flex; align-items: center; padding: 0 10px; gap: 5px; overflow-x: auto; }
+        .clip { width: 80px; height: 40px; background: var(--accent); border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: white; cursor: grab; }
+        .preview-area { height: 70%; background: #000; display: flex; align-items: center; justify-content: center; position: relative; }
+        .play-btn { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); padding: 5px 20px; cursor: pointer; background: var(--accent); border: none; color: white; border-radius: 20px; }
+    </style>
+</head>
+<body>
+
+    <!-- 蓝屏 -->
+    <div id="bsod">
+        <h1 style="font-size: 100px; margin: 0;">:(</h1>
+        <h2>Your PC ran into a problem and needs to restart.</h2>
+        <p>We're just collecting some error info, and then we'll restart for you.</p>
+        <p style="margin-top: 50px; font-family: monospace;">STOP CODE: CRITICAL_PROCESS_DIED</p>
+    </div>
+
+    <!-- 启动界面 -->
+    <div id="boot-screen">
+        <div class="loader"></div>
+        <h2>HyperOS</h2>
+        <p style="opacity: 0.6; font-size: 12px;">Initializing Kernel...</p>
+    </div>
+
+    <!-- 桌面 -->
+    <div id="desktop">
+        <div class="desktop-icons" id="desktop-icons">
+            <!-- Icons injected by JS -->
+        </div>
+    </div>
+
+    <!-- 开始菜单 -->
+    <div id="start-menu">
+        <h3 style="margin: 0 0 10px 0;">Pinned Apps</h3>
+        <div class="start-grid" id="start-grid"></div>
+        <div style="margin-top: auto; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <div style="width: 30px; height: 30px; background: #ccc; border-radius: 50%;"></div>
+                <span>User Admin</span>
+            </div>
+            <button onclick="location.reload()" style="background: none; border: none; color: white; cursor: pointer;">⏻</button>
+        </div>
+    </div>
+
+    <!-- 任务栏 -->
+    <div id="taskbar">
+        <div id="start-btn">❖</div>
+        <div class="taskbar-apps" id="taskbar-apps"></div>
+        <div id="clock">00:00 AM<br>2023-01-01</div>
+    </div>
+
+    <script>
+        // --- 系统内核 ---
+        class System {
+            constructor() {
+                this.apps = {};
+                this.zCounter = 100;
+                this.files = {
+                    "C:": {
+                        "Users": {
+                            "Admin": {
+                                "Documents": { "note.txt": "Hello World", "todo.list": "1. Build OS\n2. Sleep" },
+                                "Pictures": { "me.png": "[IMAGE DATA]" }
+                            }
+                        }
+                    }
+                };
+                this.boot();
+            }
+
+            boot() {
+                setTimeout(() => {
+                    document.getElementById('boot-screen').style.opacity = 0;
+                    setTimeout(() => {
+                        document.getElementById('boot-screen').remove();
+                        this.initClock();
+                    }, 1000);
+                }, 2000);
+
+                this.registerApps();
+                this.renderDesktop();
+                this.setupEventListeners();
+            }
+
+            initClock() {
+                const update = () => {
+                    const now = new Date();
+                    document.getElementById('clock').innerHTML = 
+                        now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) + '<br>' + 
+                        now.toLocaleDateString();
+                };
+                setInterval(update, 1000);
+                update();
+            }
+
+            registerApps() {
+                this.apps = {
+                    'terminal': { name: 'Terminal', icon: '📟', run: this.appTerminal },
+                    'vscode': { name: 'Code Studio', icon: '📝', run: this.appVSCode },
+                    'browser': { name: 'Browser', icon: '🌐', run: this.appBrowser },
+                    'paint': { name: 'Paint Pro', icon: '🎨', run: this.appPaint },
+                    'explorer': { name: 'Files', icon: '📁', run: this.appExplorer },
+                    'video': { name: 'ClipCut', icon: '🎬', run: this.appVideo },
+                    'game': { name: 'CyberSnake', icon: '🐍', run: this.appSnake },
+                    'calc': { name: 'Calc', icon: '🧮', run: this.appCalc },
+                };
+            }
+
+            renderDesktop() {
+                const container = document.getElementById('desktop-icons');
+                const startGrid = document.getElementById('start-grid');
+                
+                Object.keys(this.apps).forEach(key => {
+                    const app = this.apps[key];
+                    const el = document.createElement('div');
+                    el.className = 'icon';
+                    el.innerHTML = `<div class="icon-img">${app.icon}</div><div class="icon-label">${app.name}</div>`;
+                    el.onclick = () => this.openWindow(key);
+                    container.appendChild(el);
+
+                    // Add to start menu
+                    const smItem = el.cloneNode(true);
+                    smItem.onclick = () => {
+                        this.openWindow(key);
+                        document.getElementById('start-menu').classList.remove('visible');
+                    };
+                    startGrid.appendChild(smItem);
+                });
+            }
+
+            setupEventListeners() {
+                const startBtn = document.getElementById('start-btn');
+                const startMenu = document.getElementById('start-menu');
+                
+                startBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    startMenu.classList.toggle('visible');
+                };
+                
+                document.onclick = (e) => {
+                    if (!startMenu.contains(e.target) && e.target !== startBtn) {
+                        startMenu.classList.remove('visible');
+                    }
+                };
+            }
+
+            openWindow(appKey) {
+                const app = this.apps[appKey];
+                const id = 'win-' + Date.now();
+                const win = document.createElement('div');
+                win.className = 'window';
+                win.id = id;
+                win.style.left = (50 + Math.random() * 100) + 'px';
+                win.style.top = (50 + Math.random() * 100) + 'px';
+                win.style.width = '600px';
+                win.style.height = '400px';
+                win.style.zIndex = ++this.zCounter;
+
+                win.innerHTML = `
+                    <div class="win-header" onmousedown="system.dragStart(event, '${id}')">
+                        <div class="win-title">${app.icon} ${app.name}</div>
+                        <div class="win-controls">
+                            <div class="win-btn win-min" onclick="system.minWindow('${id}')"></div>
+                            <div class="win-btn win-max" onclick="system.maxWindow('${id}')"></div>
+                            <div class="win-btn win-close" onclick="system.closeWindow('${id}')"></div>
+                        </div>
+                    </div>
+                    <div class="win-content" id="${id}-content"></div>
+                    <div class="resizer"></div>
+                `;
+
+                win.onmousedown = () => win.style.zIndex = ++this.zCounter;
+                document.getElementById('desktop').appendChild(win);
+                
+                // Add to taskbar
+                this.addToTaskbar(id, app);
+
+                // Run App Logic
+                app.run(document.getElementById(`${id}-content`), this);
+            }
+
+            closeWindow(id) {
+                document.getElementById(id).remove();
+                document.getElementById(`task-${id}`).remove();
+            }
+            
+            minWindow(id) { document.getElementById(id).style.display = 'none'; }
+            
+            maxWindow(id) {
+                const win = document.getElementById(id);
+                if (win.style.width === '100%') {
+                    win.style.width = '600px'; win.style.height = '400px'; win.style.top = '50px'; win.style.left = '50px';
+                } else {
+                    win.style.width = '100%'; win.style.height = '100%'; win.style.top = '0'; win.style.left = '0';
+                }
+            }
+
+            addToTaskbar(winId, app) {
+                const tb = document.getElementById('taskbar-apps');
+                const item = document.createElement('div');
+                item.className = 'task-icon active';
+                item.id = `task-${winId}`;
+                item.innerHTML = app.icon;
+                item.onclick = () => {
+                    const win = document.getElementById(winId);
+                    if (win.style.display === 'none') {
+                        win.style.display = 'flex';
+                        win.style.zIndex = ++this.zCounter;
+                    } else {
+                        win.style.display = 'none';
+                    }
+                };
+                tb.appendChild(item);
+            }
+
+            dragStart(e, id) {
+                const win = document.getElementById(id);
+                let shiftX = e.clientX - win.getBoundingClientRect().left;
+                let shiftY = e.clientY - win.getBoundingClientRect().top;
+
+                const moveAt = (pageX, pageY) => {
+                    win.style.left = pageX - shiftX + 'px';
+                    win.style.top = pageY - shiftY + 'px';
+                };
+
+                const onMouseMove = (event) => moveAt(event.pageX, event.pageY);
+
+                document.addEventListener('mousemove', onMouseMove);
+                document.onmouseup = () => {
+                    document.removeEventListener('mousemove', onMouseMove);
+                    document.onmouseup = null;
+                };
+            }
+
+            // --- 应用实现 ---
+
+            appTerminal(container, sys) {
+                container.innerHTML = `<div class="terminal-body" id="term-out"><div>HyperOS Kernel v1.0</div><div>Type 'help' for commands. Type 'python' for Python shell.</div><br></div>`;
+                const body = container.querySelector('.terminal-body');
+                
+                let pythonMode = false;
+
+                const createLine = () => {
+                    const line = document.createElement('div');
+                    line.innerHTML = `<span class="prompt">${pythonMode ? '>>>' : '$'}</span><input class="cmd-input" type="text" autofocus>`;
+                    body.appendChild(line);
+                    const input = line.querySelector('input');
+                    input.focus();
+                    input.onkeydown = (e) => {
+                        if (e.key === 'Enter') {
+                            const cmd = input.value.trim();
+                            input.disabled = true;
+                            
+                            if (pythonMode) {
+                                if (cmd === 'exit()') {
+                                    pythonMode = false;
+                                    output("Exited Python.");
+                                } else if (cmd.startsWith('print(')) {
+                                    output(cmd.slice(6, -1).replace(/["']/g, ""));
+                                } else {
+                                    try { output(eval(cmd)); } catch(err) { output("Error: " + err.message); }
+                                }
+                            } else {
+                                if (cmd === 'help') output("ls, clear, python, code, rm -rf /");
+                                else if (cmd === 'clear') body.innerHTML = '';
+                                else if (cmd === 'ls') output("Documents  Pictures  System32");
+                                else if (cmd === 'python') { pythonMode = true; output("Python 3.9 (Micro) [Type 'exit()' to quit]"); }
+                                else if (cmd === 'rm -rf /') { document.getElementById('bsod').style.display = 'block'; document.getElementById('desktop').style.display='none'; }
+                                else if (cmd !== '') output(`Command not found: ${cmd}`);
+                            }
+                            
+                            createLine();
+                            body.scrollTop = body.scrollHeight;
+                        }
+                    };
+                };
+
+                const output = (text) => {
+                    if (text === undefined) return;
+                    const d = document.createElement('div');
+                    d.textContent = text;
+                    body.appendChild(d);
+                };
+
+                container.onclick = () => {
+                    const inputs = container.querySelectorAll('input');
+                    if(inputs.length > 0) inputs[inputs.length-1].focus();
+                }
+                createLine();
+            }
+
+            appPaint(container) {
+                container.innerHTML = `
+                    <div class="paint-tools">
+                        <input type="color" class="color-picker" value="#000000">
+                        <input type="range" min="1" max="20" value="5" style="width:60px">
+                        <button style="font-size:10px">Clear</button>
+                    </div>
+                    <canvas></canvas>
+                `;
+                const canvas = container.querySelector('canvas');
+                const ctx = canvas.getContext('2d');
+                const color = container.querySelector('.color-picker');
+                const size = container.querySelector('input[type=range]');
+                const btn = container.querySelector('button');
+
+                const resize = () => {
+                    canvas.width = container.clientWidth;
+                    canvas.height = container.clientHeight - 30;
+                };
+                setTimeout(resize, 100); // Wait for layout
+
+                let painting = false;
+                canvas.onmousedown = (e) => {
+                    painting = true;
+                    ctx.beginPath();
+                    ctx.moveTo(e.offsetX, e.offsetY);
+                    ctx.strokeStyle = color.value;
+                    ctx.lineWidth = size.value;
+                    ctx.lineCap = 'round';
+                };
+                canvas.onmousemove = (e) => {
+                    if (!painting) return;
+                    ctx.lineTo(e.offsetX, e.offsetY);
+                    ctx.stroke();
+                };
+                canvas.onmouseup = () => painting = false;
+                btn.onclick = () => ctx.clearRect(0,0,canvas.width, canvas.height);
+            }
+
+            appVSCode(container) {
+                container.innerHTML = `
+                    <div style="height:100%; display:flex;">
+                        <div style="width:150px; background:#1e1e1e; color:#ccc; font-size:12px; padding:5px; border-right:1px solid #333;">
+                            <div>EXPLORER</div>
+                            <div style="margin-left:10px; color:#5a9">index.html</div>
+                            <div style="margin-left:10px; color:#5a9">style.css</div>
+                            <div style="margin-left:10px; color:#e95">script.js</div>
+                        </div>
+                        <div style="flex:1; position:relative; display:flex;">
+                            <div class="code-lines">1<br>2<br>3<br>4<br>5</div>
+                            <textarea class="code-area" spellcheck="false">
+function init() {
+    console.log("Hello World");
+    return true;
+}</textarea>
+                        </div>
+                    </div>
+                `;
+            }
+
+            appBrowser(container) {
+                container.innerHTML = `
+                    <div style="height:30px; background:#eee; display:flex; align-items:center; padding:0 5px; gap:5px;">
+                        <button>Back</button><input type="text" value="https://wikipedia.org" style="flex:1;"><button>Go</button>
+                    </div>
+                    <iframe src="https://en.m.wikipedia.org/wiki/Special:Random" style="width:100%; height:calc(100% - 30px); border:none;"></iframe>
+                `;
+            }
+
+            appExplorer(container, sys) {
+                container.innerHTML = `
+                    <div class="explorer-body">
+                        <div class="sidebar">
+                            <div>Desktop</div>
+                            <div>Documents</div>
+                            <div>Downloads</div>
+                            <div>Pictures</div>
+                        </div>
+                        <div class="file-area">
+                            <div class="file-item"><div style="font-size:30px">📄</div>resume.pdf</div>
+                            <div class="file-item"><div style="font-size:30px">📷</div>photo.jpg</div>
+                            <div class="file-item"><div style="font-size:30px">🎵</div>song.mp3</div>
+                            <div class="file-item"><div style="font-size:30px">📂</div>Projects</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            appSnake(container) {
+                container.innerHTML = `<canvas style="background:#000; width:100%; height:100%"></canvas>`;
+                const canvas = container.querySelector('canvas');
+                const ctx = canvas.getContext('2d');
+                
+                setTimeout(() => {
+                    canvas.width = container.clientWidth;
+                    canvas.height = container.clientHeight;
+                    
+                    const box = 20;
+                    let snake = [{x: 9*box, y: 10*box}];
+                    let food = { x: Math.floor(Math.random()*15+1)*box, y: Math.floor(Math.random()*10+1)*box };
+                    let dir = "RIGHT";
+                    
+                    container.tabIndex = 1; // make focusable
+                    container.focus();
+                    
+                    container.onkeydown = (e) => {
+                        if(e.keyCode == 37 && dir != "RIGHT") dir = "LEFT";
+                        else if(e.keyCode == 38 && dir != "DOWN") dir = "UP";
+                        else if(e.keyCode == 39 && dir != "LEFT") dir = "RIGHT";
+                        else if(e.keyCode == 40 && dir != "UP") dir = "DOWN";
+                    };
+
+                    const game = setInterval(() => {
+                        // Clear
+                        ctx.fillStyle = "#000";
+                        ctx.fillRect(0,0,canvas.width, canvas.height);
+                        
+                        // Food
+                        ctx.fillStyle = "red";
+                        ctx.fillRect(food.x, food.y, box, box);
+                        
+                        // Snake
+                        for(let i=0; i<snake.length; i++) {
+                            ctx.fillStyle = (i==0) ? "lime" : "green";
+                            ctx.fillRect(snake[i].x, snake[i].y, box, box);
+                        }
+                        
+                        let snakeX = snake[0].x;
+                        let snakeY = snake[0].y;
+                        
+                        if(dir == "LEFT") snakeX -= box;
+                        if(dir == "UP") snakeY -= box;
+                        if(dir == "RIGHT") snakeX += box;
+                        if(dir == "DOWN") snakeY += box;
+                        
+                        if(snakeX == food.x && snakeY == food.y) {
+                            food = { x: Math.floor(Math.random()*(canvas.width/box))*box, y: Math.floor(Math.random()*(canvas.height/box))*box };
+                        } else {
+                            snake.pop();
+                        }
+                        
+                        let newHead = { x: snakeX, y: snakeY };
+                        
+                        if(snakeX < 0 || snakeX >= canvas.width || snakeY < 0 || snakeY >= canvas.height) {
+                            clearInterval(game);
+                            ctx.fillStyle = "white";
+                            ctx.fillText("GAME OVER", canvas.width/2-30, canvas.height/2);
+                        }
+                        
+                        snake.unshift(newHead);
+                    }, 100);
+                }, 100);
+            }
+
+            appVideo(container) {
+                container.innerHTML = `
+                    <div class="preview-area">
+                        <div style="color:#555;">[ VIDEO PREVIEW ]</div>
+                        <button class="play-btn">▶ Play Render</button>
+                    </div>
+                    <div class="timeline">
+                        <div class="clip" style="width:100px; background:#e74c3c">Intro</div>
+                        <div class="clip" style="width:150px; background:#3498db">Scene 1</div>
+                        <div class="clip" style="width:80px; background:#f1c40f">Effect</div>
+                        <div class="clip" style="width:120px; background:#9b59b6">Outro</div>
+                    </div>
+                `;
+                const btn = container.querySelector('.play-btn');
+                const preview = container.querySelector('.preview-area div');
+                btn.onclick = () => {
+                    preview.style.color = 'white';
+                    preview.innerText = "Rendering...";
+                    let frames = ["⬛", "🟥", "🟦", "🟨", "🟪", "🏁"];
+                    let i = 0;
+                    const anim = setInterval(() => {
+                        preview.innerText = frames[i % frames.length];
+                        preview.style.fontSize = "100px";
+                        i++;
+                        if(i > 10) {
+                            clearInterval(anim);
+                            preview.innerText = "Finished";
+                            preview.style.fontSize = "20px";
+                        }
+                    }, 200);
+                }
+            }
+
+            appCalc(container) {
+                container.innerHTML = `
+                    <div style="height:100%; display:flex; flex-direction:column; padding:10px;">
+                        <input type="text" readonly style="width:100%; height:40px; margin-bottom:10px; text-align:right; font-size:20px; background:#333; color:#fff; border:none;">
+                        <div style="flex:1; display:grid; grid-template-columns:repeat(4, 1fr); gap:5px;">
+                            <button>7</button><button>8</button><button>9</button><button>/</button>
+                            <button>4</button><button>5</button><button>6</button><button>*</button>
+                            <button>1</button><button>2</button><button>3</button><button>-</button>
+                            <button>C</button><button>0</button><button>=</button><button>+</button>
+                        </div>
+                    </div>
+                `;
+                const display = container.querySelector('input');
+                container.querySelectorAll('button').forEach(b => {
+                    b.style.cursor = 'pointer';
+                    b.onclick = () => {
+                        const v = b.innerText;
+                        if(v === 'C') display.value = '';
+                        else if(v === '=') {
+                            try { display.value = eval(display.value); } catch { display.value = 'Error'; }
+                        } else display.value += v;
+                    }
+                });
+            }
+        }
+
+        // 启动系统
+        const system = new System();
+
+    </script>
+</body>
+</html>
+```

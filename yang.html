@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>羊了个羊 - 地狱难度版</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #c4e69d; /* 经典的草地绿背景 */
+            font-family: "Microsoft YaHei", sans-serif;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        /* 游戏标题 */
+        h1 {
+            text-align: center;
+            color: #fff;
+            text-shadow: 2px 2px 0 #5d8a28;
+            margin-top: 20px;
+            pointer-events: none;
+        }
+
+        /* 游戏主区域 */
+        #game-board {
+            position: relative;
+            width: 100%;
+            height: 60vh;
+            margin-top: 20px;
+        }
+
+        /* 卡片样式 */
+        .card {
+            width: 48px;
+            height: 56px;
+            background-color: #fff;
+            border: 2px solid #333;
+            border-radius: 6px;
+            position: absolute;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 28px;
+            box-shadow: 0 4px 0 #ccc; /* 伪3D效果 */
+            cursor: pointer;
+            transition: top 0.2s, left 0.2s, transform 0.1s;
+            z-index: 0;
+        }
+
+        /* 被遮挡的卡片变暗 */
+        .card.covered {
+            filter: brightness(40%);
+            pointer-events: none; /* 禁止点击 */
+            cursor: default;
+        }
+
+        /* 选中时的点击效果 */
+        .card:active {
+            transform: scale(0.95);
+        }
+
+        /* 底部槽位容器 */
+        #dock-container {
+            position: fixed;
+            bottom: 50px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 370px; /* 7 * (48+4) + padding */
+            height: 70px;
+            background-color: #8b5a2b; /* 木纹色 */
+            border: 4px solid #5d3a1a;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            padding-left: 5px;
+            box-sizing: border-box;
+        }
+
+        /* 槽位里的卡片样式重置 */
+        .card.in-dock {
+            position: static; /* 取消绝对定位 */
+            margin-right: 4px;
+            box-shadow: none;
+            border-bottom: 2px solid #333;
+            transform: none !important;
+            filter: brightness(100%) !important;
+            pointer-events: none;
+        }
+
+        /* 结算弹窗 */
+        #modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            z-index: 999;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+        #modal h2 {
+            color: #fff;
+            font-size: 40px;
+            margin-bottom: 20px;
+        }
+        #modal button {
+            padding: 15px 40px;
+            font-size: 24px;
+            background: #fdd835;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 4px 0 #fbc02d;
+        }
+        #modal button:active {
+            transform: translateY(4px);
+            box-shadow: none;
+        }
+
+        /* 关卡提示 */
+        #level-indicator {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div id="level-indicator">当前关卡：第 1 关</div>
+    <h1>🐑 羊了个羊 🐑</h1>
+
+    <!-- 游戏棋盘区 -->
+    <div id="game-board"></div>
+
+    <!-- 底部槽位 -->
+    <div id="dock-container"></div>
+
+    <!-- 弹窗 -->
+    <div id="modal">
+        <h2 id="result-text">失败！</h2>
+        <button onclick="restartGame()">重新挑战</button>
+    </div>
+
+    <script>
+        // === 1. 游戏配置 ===
+        const GAME_BOARD = document.getElementById('game-board');
+        const DOCK = document.getElementById('dock-container');
+        const MODAL = document.getElementById('modal');
+        const RESULT_TEXT = document.getElementById('result-text');
+        const LEVEL_TEXT = document.getElementById('level-indicator');
+
+        // 图案素材 (Emoji)
+        const ICONS = ['🥕', '🥬', '🔥', '🧤', '🧶', '🌲', '🔔', '🌽', '🥛', '🔨', '✂️', '🍗'];
+        
+        let currentLevel = 1;
+        let dockCards = []; // 槽位里的牌
+        let allCards = [];  // 场上所有的牌 DOM 对象
+
+        // === 2. 关卡设计 ===
+
+        // 初始化游戏
+        function initGame(level) {
+            currentLevel = level;
+            LEVEL_TEXT.innerText = `当前关卡：第 ${level} 关`;
+            
+            // 清理旧数据
+            GAME_BOARD.innerHTML = '';
+            DOCK.innerHTML = '';
+            dockCards = [];
+            allCards = [];
+            MODAL.style.display = 'none';
+
+            if (level === 1) {
+                setupLevel1();
+            } else {
+                setupLevel2();
+            }
+            
+            updateCardStatus(); // 初始计算遮挡
+        }
+
+        // 第一关：极其简单 (只有3种图案，少量牌，平铺)
+        function setupLevel1() {
+            const types = ICONS.slice(0, 3); // 只用前3种
+            let cardData = [];
+            // 每种3张，保证能消完
+            types.forEach(icon => {
+                for(let i=0; i<3; i++) cardData.push(icon);
+            });
+            // 再加一组打乱
+            types.forEach(icon => {
+                for(let i=0; i<3; i++) cardData.push(icon);
+            });
+
+            // 简单的网格布局
+            const centerX = window.innerWidth / 2 - 24;
+            const startY = 100;
+            
+            cardData.forEach((icon, index) => {
+                let row = Math.floor(index / 6);
+                let col = index % 6;
+                let x = centerX - 150 + col * 55;
+                let y = startY + row * 60;
+                createCard(icon, x, y, 0);
+            });
+        }
+
+        // 第二关：地狱难度 (大量牌，随机堆叠)
+        function setupLevel2() {
+            // 1. 生成卡池 (必须是3的倍数)
+            let cardData = [];
+            const totalCards = 210; // 数量越多越难
+            
+            // 随机生成三三成对的牌
+            for (let i = 0; i < totalCards / 3; i++) {
+                // 随机选一个图案
+                const randomIcon = ICONS[Math.floor(Math.random() * ICONS.length)];
+                cardData.push(randomIcon, randomIcon, randomIcon);
+            }
+            
+            // 打乱数组 (洗牌)
+            cardData.sort(() => Math.random() - 0.5);
+
+            // 2. 定义堆叠区域中心
+            const cx = window.innerWidth / 2 - 24;
+            const cy = 150;
+
+            // 3. 生成卡片 DOM
+            cardData.forEach((icon, index) => {
+                // 核心算法：层层堆叠
+                // 模拟金字塔或随机散落
+                
+                // 随机偏移量，制造杂乱感，但大部分集中在中间
+                // 每一层的范围逐渐变大或变小
+                let layer = Math.floor(index / 10); // 简单的分层逻辑
+                
+                // x, y 坐标：在一个范围内随机，且一定要按网格对齐(每步24px半个身位)，制造互相压住一半的效果
+                // range 随层数变化不重要，重要的是随机性
+                let range = 120; 
+                let randomX = (Math.random() - 0.5) * 2 * range;
+                let randomY = (Math.random() - 0.5) * 2 * range;
+
+                // 对齐网格 (Step = 卡片宽的一半 24)
+                let finalX = cx + Math.round(randomX / 24) * 24;
+                let finalY = cy + Math.round(randomY / 24) * 24;
+
+                // Z-index 随 index 增加，保证后生成的压在上面
+                createCard(icon, finalX, finalY, index);
+            });
+        }
+
+        // 创建单张卡片 DOM
+        function createCard(icon, x, y, zIndex) {
+            const card = document.createElement('div');
+            card.classList.add('card');
+            card.innerText = icon;
+            card.style.left = x + 'px';
+            card.style.top = y + 'px';
+            card.style.zIndex = zIndex;
+            
+            // 数据绑定
+            card.dataset.icon = icon;
+            card.dataset.id = Date.now() + Math.random(); // 唯一ID
+
+            // 点击事件
+            card.addEventListener('click', function() {
+                // 如果被遮挡，不能点
+                if (this.classList.contains('covered')) return;
+                
+                moveToDock(this);
+            });
+
+            GAME_BOARD.appendChild(card);
+            allCards.push(card);
+        }
+
+        // === 3. 核心逻辑：遮挡判断 ===
+        function updateCardStatus() {
+            // 暴力检测：遍历每张牌，看它是否被“Z-index比它大”且“位置重叠”的牌遮挡
+            allCards.forEach(cardA => {
+                // 如果已经在槽位里，不用管
+                if (cardA.classList.contains('in-dock')) return;
+
+                let isCovered = false;
+                const rectA = cardA.getBoundingClientRect();
+
+                for (let cardB of allCards) {
+                    if (cardA === cardB) continue;
+                    if (cardB.classList.contains('in-dock')) continue; // 槽里的牌不遮挡场上的
+                    
+                    // 只有 Z-index 更大的牌才能遮挡 A
+                    // 转换 zIndex 为数字比较
+                    if (parseInt(cardB.style.zIndex) <= parseInt(cardA.style.zIndex)) continue;
+
+                    const rectB = cardB.getBoundingClientRect();
+
+                    // 判断矩形重叠 (简单的 AABB 碰撞)
+                    // 稍微缩小一点碰撞判定范围(margin)，让边缘露出来一点点也能点，更符合手感
+                    const margin = 2; 
+                    const intersect = !(
+                        rectA.right - margin < rectB.left + margin || 
+                        rectA.left + margin > rectB.right - margin || 
+                        rectA.bottom - margin < rectB.top + margin || 
+                        rectA.top + margin > rectB.bottom - margin
+                    );
+
+                    if (intersect) {
+                        isCovered = true;
+                        break; // 只要被一张牌挡住，就废了
+                    }
+                }
+
+                if (isCovered) {
+                    cardA.classList.add('covered');
+                } else {
+                    cardA.classList.remove('covered');
+                }
+            });
+        }
+
+        // === 4. 核心逻辑：移动到槽位与消除 ===
+        function moveToDock(card) {
+            // 1. 从 board 数组逻辑中移除 (视觉上已经在 dock 里了，不需要专门删数组，用 class 区分即可)
+            card.classList.add('in-dock');
+            card.classList.remove('covered'); // 进槽位肯定亮
+            card.style.zIndex = 9999; // 保证在最上层动画
+
+            // 2. 添加到逻辑槽位数组
+            dockCards.push(card);
+            
+            // 3. 渲染槽位 (将 DOM 移动到 dock 容器)
+            DOCK.appendChild(card);
+            
+            // 4. 检查消除
+            checkMatch();
+
+            // 5. 检查失败
+            if (dockCards.length >= 7) {
+                gameOver(false);
+            }
+
+            // 6. 更新场上剩余牌的遮挡状态
+            updateCardStatus();
+        }
+
+        function checkMatch() {
+            // 统计每个图案的数量
+            let counts = {};
+            dockCards.forEach(c => {
+                let icon = c.dataset.icon;
+                counts[icon] = (counts[icon] || 0) + 1;
+            });
+
+            // 找出数量达到3的图案
+            let matchIcon = null;
+            for (let icon in counts) {
+                if (counts[icon] >= 3) {
+                    matchIcon = icon;
+                    break;
+                }
+            }
+
+            if (matchIcon) {
+                // 执行消除
+                // 1. 找出对应的 DOM 元素
+                const toRemove = dockCards.filter(c => c.dataset.icon === matchIcon).slice(0, 3);
+                
+                // 2. 从 DOM 移除
+                toRemove.forEach(c => {
+                    c.remove(); // 彻底删除
+                    // 从 allCards 移除，优化性能
+                    allCards = allCards.filter(x => x !== c);
+                });
+
+                // 3. 从 dockCards 数组移除
+                dockCards = dockCards.filter(c => !toRemove.includes(c));
+                
+                // 4. 检查是否通关
+                // 如果 board 上没牌了，且 dock 里也没牌了 (实际上只需要判断 allCards 是否为空)
+                // 注意：allCards 包含了 dock 里的牌，所以只要 allCards 空了就是赢了
+                if (allCards.length === 0) {
+                    setTimeout(() => gameOver(true), 300);
+                }
+            }
+        }
+
+        // 游戏结束
+        function gameOver(win) {
+            MODAL.style.display = 'flex';
+            if (win) {
+                if (currentLevel === 1) {
+                    RESULT_TEXT.innerText = "恭喜通过第一关！\n真正的挑战开始了...";
+                    RESULT_TEXT.style.color = "#81c784";
+                    document.querySelector('#modal button').innerText = "进入第二关";
+                    document.querySelector('#modal button').onclick = function() {
+                        initGame(2);
+                    };
+                } else {
+                    RESULT_TEXT.innerText = "竟然通关了？！\n你是万中无一的天才！";
+                    RESULT_TEXT.style.color = "#ffd700";
+                    document.querySelector('#modal button').innerText = "再来一局";
+                    document.querySelector('#modal button').onclick = restartGame;
+                }
+            } else {
+                RESULT_TEXT.innerText = "你也是那99.9%的羊群...";
+                RESULT_TEXT.style.color = "#e57373";
+                document.querySelector('#modal button').innerText = "不服，重来！";
+                document.querySelector('#modal button').onclick = restartGame;
+            }
+        }
+
+        function restartGame() {
+            // 如果是在第二关输的，重开直接打第二关，省得再打第一关
+            initGame(currentLevel); 
+        }
+
+        // 启动
+        initGame(1);
+
+    </script>
+</body>
+</html>

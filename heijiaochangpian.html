@@ -1,0 +1,448 @@
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vinyl Spectrum Player</title>
+    <style>
+        :root {
+            --bg: #0f0f12;
+            --glass: rgba(255, 255, 255, 0.05);
+            --accent: #ff0055;
+            --text: #e0e0e0;
+            --record-size: 360px;
+        }
+
+        * { box-sizing: border-box; user-select: none; -webkit-user-drag: none; }
+        
+        body {
+            margin: 0; padding: 0;
+            height: 100vh; width: 100vw;
+            background-color: var(--bg);
+            background-image: radial-gradient(circle at 50% 50%, #1a1a20 0%, #000 100%);
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden; color: var(--text);
+        }
+
+        /* --- 可视化背景层 --- */
+        #visualizer {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 0;
+            filter: blur(1px) contrast(1.2);
+            pointer-events: none;
+        }
+
+        /* --- 唱机主体 --- */
+        .turntable-deck {
+            position: relative;
+            width: 500px; height: 500px;
+            z-index: 10;
+            display: flex; align-items: center; justify-content: center;
+        }
+
+        /* --- 黑胶唱片 --- */
+        .vinyl-wrapper {
+            width: var(--record-size); height: var(--record-size);
+            border-radius: 50%;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+            position: relative;
+            transition: transform 0.1s linear; /* 用于低音震动 */
+            will-change: transform;
+        }
+
+        .vinyl-disc {
+            width: 100%; height: 100%;
+            border-radius: 50%;
+            background: 
+                /* 沟槽纹理 */
+                repeating-radial-gradient(
+                    #111 0, 
+                    #111 2px, 
+                    #222 3px, 
+                    #222 4px
+                );
+            position: relative;
+            animation: spin 0s linear infinite; /* 默认停止 */
+        }
+
+        /* 唱片光泽反射 */
+        .vinyl-disc::after {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            border-radius: 50%;
+            background: linear-gradient(45deg, transparent 40%, rgba(255,255,255,0.1) 50%, transparent 60%);
+            pointer-events: none;
+        }
+
+        /* 唱片封面 Label */
+        .vinyl-label {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 120px; height: 120px;
+            border-radius: 50%;
+            background: url('https://images.unsplash.com/photo-1493225255756-d9584f8606e9?q=80&w=300&auto=format&fit=crop');
+            background-size: cover;
+            border: 4px solid #111;
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+            z-index: 2;
+        }
+
+        /* 旋转动画 */
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        .playing .vinyl-disc { animation: spin 1.8s linear infinite; }
+        .paused .vinyl-disc { animation-play-state: paused; }
+
+        /* --- 唱臂 (Tonearm) --- */
+        .tonearm {
+            position: absolute;
+            top: -20px; right: -40px;
+            width: 60px; height: 300px;
+            transform-origin: 30px 30px; /* 旋转轴心 */
+            transform: rotate(0deg);
+            transition: transform 1s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 20;
+            pointer-events: none;
+        }
+
+        .tonearm.active { transform: rotate(28deg); }
+
+        /* 唱臂结构绘制 */
+        .arm-base { width: 60px; height: 60px; background: #333; border-radius: 50%; border: 2px solid #555; box-shadow: 0 5px 10px black; }
+        .arm-rod { position: absolute; top: 30px; left: 25px; width: 10px; height: 220px; background: linear-gradient(90deg, #888, #ddd, #888); transform: rotate(-5deg); transform-origin: top center; }
+        .arm-head { position: absolute; bottom: 20px; left: -10px; width: 30px; height: 50px; background: #222; transform: rotate(20deg); border-radius: 4px; box-shadow: 2px 2px 5px rgba(0,0,0,0.5); }
+        .arm-needle { position: absolute; bottom: -5px; left: 10px; width: 2px; height: 10px; background: #fff; }
+
+        /* --- 底部控制区 --- */
+        .controls-bar {
+            position: fixed; bottom: 30px;
+            width: 600px; height: 80px;
+            background: rgba(20, 20, 25, 0.8);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+            z-index: 100;
+        }
+
+        .track-info { display: flex; flex-direction: column; max-width: 200px; }
+        .track-title { font-size: 14px; font-weight: bold; color: white; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .track-status { font-size: 11px; color: #888; margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; }
+
+        .buttons { display: flex; align-items: center; gap: 20px; }
+        
+        .btn {
+            background: none; border: none; color: white; cursor: pointer;
+            font-size: 24px; opacity: 0.8; transition: 0.2s;
+            width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+            border-radius: 50%; background: rgba(255,255,255,0.05);
+        }
+        .btn:hover { opacity: 1; background: rgba(255,255,255,0.1); transform: scale(1.05); }
+        .btn-main { background: var(--accent); box-shadow: 0 0 15px var(--accent); color: white; }
+        .btn-main:hover { background: #ff2e75; }
+
+        .volume-wrapper { display: flex; align-items: center; gap: 10px; }
+        .vol-icon { font-size: 16px; color: #888; }
+        
+        input[type="range"] {
+            -webkit-appearance: none; width: 100px; height: 4px; background: #444; border-radius: 2px; outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 12px; height: 12px; background: white; border-radius: 50%; cursor: pointer; transition: 0.2s;
+        }
+        input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.5); }
+
+        #file-input { display: none; }
+        
+        /* 提示层 */
+        .overlay-tip {
+            position: absolute; top: 20px;
+            background: rgba(0,0,0,0.5); padding: 8px 16px;
+            border-radius: 20px; font-size: 12px; color: #aaa;
+            pointer-events: none; opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 顶部提示 -->
+    <div class="overlay-tip">Drag & Drop Audio File or Click Eject to Load</div>
+
+    <!-- 背景频谱 Canvas -->
+    <canvas id="visualizer"></canvas>
+
+    <!-- 唱机主体 -->
+    <div class="turntable-deck">
+        <div class="vinyl-wrapper" id="vinylWrapper">
+            <div class="vinyl-disc" id="disc">
+                <div class="vinyl-label"></div>
+            </div>
+        </div>
+        
+        <!-- 唱臂 -->
+        <div class="tonearm" id="tonearm">
+            <div class="arm-base"></div>
+            <div class="arm-rod">
+                <div class="arm-head">
+                    <div class="arm-needle"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 底部控制栏 -->
+    <div class="controls-bar">
+        <!-- 隐藏的文件上传 -->
+        <input type="file" id="file-input" accept="audio/*">
+
+        <div class="buttons">
+            <button class="btn" id="ejectBtn" title="Load Song">⏏</button>
+        </div>
+
+        <div class="buttons" style="position: absolute; left: 50%; transform: translateX(-50%);">
+            <button class="btn btn-main" id="playBtn">▶</button>
+        </div>
+
+        <div class="track-info">
+            <div class="track-title" id="trackName">No Disc Loaded</div>
+            <div class="track-status" id="timeDisplay">0:00 / 0:00</div>
+        </div>
+
+        <div class="volume-wrapper">
+            <span class="vol-icon">🔈</span>
+            <input type="range" id="volSlider" min="0" max="1" step="0.01" value="0.8">
+        </div>
+    </div>
+
+    <script>
+        // --- 变量与 DOM ---
+        const fileInput = document.getElementById('file-input');
+        const playBtn = document.getElementById('playBtn');
+        const ejectBtn = document.getElementById('ejectBtn');
+        const trackName = document.getElementById('trackName');
+        const timeDisplay = document.getElementById('timeDisplay');
+        const volSlider = document.getElementById('volSlider');
+        
+        const disc = document.getElementById('disc'); // 旋转部分
+        const vinylWrapper = document.getElementById('vinylWrapper'); // 震动部分
+        const tonearm = document.getElementById('tonearm');
+        const canvas = document.getElementById('visualizer');
+        const ctx = canvas.getContext('2d');
+
+        // 音频核心变量
+        let audioCtx, audioSource, analyser;
+        let audioEl = new Audio();
+        let isPlaying = false;
+        let dataArray, bufferLength;
+        let animationId;
+
+        // 初始化 Canvas 尺寸
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // --- 事件监听 ---
+        
+        // 1. 加载文件
+        ejectBtn.onclick = () => fileInput.click();
+        
+        fileInput.onchange = function(e) {
+            const file = e.target.files[0];
+            if(!file) return;
+
+            trackName.textContent = file.name.replace(/\.[^/.]+$/, "");
+            const objectUrl = URL.createObjectURL(file);
+            audioEl.src = objectUrl;
+            
+            // 重置状态
+            stopMusic();
+            
+            // 初始化 AudioContext (需要用户交互后触发)
+            if(!audioCtx) initAudioContext();
+            
+            // 自动播放
+            playMusic();
+        };
+        
+        // 2. 播放/暂停
+        playBtn.onclick = () => {
+            if(!audioEl.src) return fileInput.click();
+            if(!audioCtx) initAudioContext();
+            
+            if(isPlaying) pauseMusic();
+            else playMusic();
+        };
+
+        // 3. 音量
+        volSlider.oninput = (e) => {
+            audioEl.volume = e.target.value;
+        };
+
+        // 4. 拖拽文件支持
+        document.body.addEventListener('dragover', e => e.preventDefault());
+        document.body.addEventListener('drop', e => {
+            e.preventDefault();
+            if(e.dataTransfer.files.length > 0) {
+                fileInput.files = e.dataTransfer.files;
+                const event = new Event('change');
+                fileInput.dispatchEvent(event);
+            }
+        });
+
+        // --- 音频逻辑 ---
+
+        function initAudioContext() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256; // 决定频谱条数量 (128个数据点)
+            
+            audioSource = audioCtx.createMediaElementSource(audioEl);
+            audioSource.connect(analyser);
+            analyser.connect(audioCtx.destination);
+            
+            bufferLength = analyser.frequencyBinCount;
+            dataArray = new Uint8Array(bufferLength);
+        }
+
+        function playMusic() {
+            if(audioCtx.state === 'suspended') audioCtx.resume();
+            
+            audioEl.play().then(() => {
+                isPlaying = true;
+                playBtn.textContent = '⏸'; // 暂停图标
+                
+                // UI 动画
+                document.body.classList.add('playing');
+                disc.parentElement.classList.add('playing');
+                tonearm.classList.add('active');
+                
+                // 启动可视化
+                renderFrame();
+            }).catch(e => console.error("Play failed", e));
+        }
+
+        function pauseMusic() {
+            audioEl.pause();
+            isPlaying = false;
+            playBtn.textContent = '▶';
+            
+            // UI 动画暂停
+            document.body.classList.remove('playing'); // 停止背景光效等
+            document.body.classList.add('paused');
+            
+            // 唱臂不需要立即回去，这符合真实逻辑，但在代码里如果想复位就移除active
+            // 这里我们设计为：暂停时，唱片停转，唱臂抬起（或保持原位取决于喜好）。
+            // 为了拟真，暂停时通常唱臂不会自动复位，但这里为了视觉反馈，我们让它稍微抬一下或不做动作
+            // 下面代码选择：暂停时不复位唱臂，停止时复位。
+        }
+
+        function stopMusic() {
+            pauseMusic();
+            audioEl.currentTime = 0;
+            tonearm.classList.remove('active'); // 唱臂复位
+            // 强制停止旋转动画
+            disc.style.animation = 'none';
+            disc.offsetHeight; /* trigger reflow */
+            disc.style.animation = null; 
+        }
+        
+        audioEl.addEventListener('ended', () => {
+            isPlaying = false;
+            playBtn.textContent = '▶';
+            tonearm.classList.remove('active'); // 播放结束，唱臂复位
+        });
+
+        audioEl.addEventListener('timeupdate', () => {
+            const curr = formatTime(audioEl.currentTime);
+            const dur = formatTime(audioEl.duration || 0);
+            timeDisplay.textContent = `${curr} / ${dur}`;
+        });
+
+        function formatTime(s) {
+            const min = Math.floor(s / 60);
+            const sec = Math.floor(s % 60);
+            return `${min}:${sec < 10 ? '0'+sec : sec}`;
+        }
+
+        // --- 核心可视化算法 ---
+
+        function renderFrame() {
+            if (!isPlaying) return;
+            requestAnimationFrame(renderFrame);
+
+            analyser.getByteFrequencyData(dataArray);
+
+            // 1. 清空画布
+            ctx.fillStyle = 'rgba(15, 15, 18, 0.2)'; // 拖尾效果
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 2. 计算基础参数
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+            const radius = 190; // 比唱片稍大 (唱片直径360 -> 半径180)
+            
+            // 3. 计算低音能量 (Bass Kick)
+            // 取低频段 (前20个数据) 的平均值
+            let bassTotal = 0;
+            for(let i=0; i<20; i++) bassTotal += dataArray[i];
+            const bassAvg = bassTotal / 20;
+            
+            // 唱片震动效果
+            const scale = 1 + (bassAvg / 255) * 0.15; 
+            vinylWrapper.style.transform = `scale(${scale})`;
+
+            // 4. 绘制环形频谱
+            ctx.beginPath();
+            for (let i = 0; i < bufferLength; i++) {
+                const barHeight = (dataArray[i] / 255) * 150 * (1 + (bassAvg/255)); // 随低音增强幅度
+                
+                // 将频谱映射到圆周上
+                // 做了两次镜像，让频谱左右对称
+                const rads = (Math.PI * 2) / bufferLength;
+                const angle = i * rads - Math.PI / 2; // 从上方开始
+                const mirrorAngle = -i * rads - Math.PI / 2;
+
+                drawBar(cx, cy, angle, radius, barHeight, i);
+                if(i > 0) drawBar(cx, cy, mirrorAngle, radius, barHeight, i);
+            }
+        }
+
+        function drawBar(cx, cy, angle, radius, length, index) {
+            const xStart = cx + Math.cos(angle) * (radius + 10);
+            const yStart = cy + Math.sin(angle) * (radius + 10);
+            const xEnd = cx + Math.cos(angle) * (radius + 10 + length);
+            const yEnd = cy + Math.sin(angle) * (radius + 10 + length);
+
+            // 动态颜色：基于索引和时间的色相旋转
+            const hue = (index * 2 + performance.now() / 50) % 360;
+            
+            ctx.strokeStyle = `hsl(${hue}, 80%, 60%)`;
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round';
+            
+            ctx.beginPath();
+            ctx.moveTo(xStart, yStart);
+            ctx.lineTo(xEnd, yEnd);
+            ctx.stroke();
+            
+            // 添加发光效果 (性能消耗较大，但为了效果)
+            if(length > 50) {
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = `hsl(${hue}, 80%, 60%)`;
+                ctx.stroke(); // 重绘以应用阴影
+                ctx.shadowBlur = 0; // 重置
+            }
+        }
+
+    </script>
+</body>
+</html>
+```

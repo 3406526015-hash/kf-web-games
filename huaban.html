@@ -1,0 +1,442 @@
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retro Pixel Studio</title>
+    <!-- 引入 gif.js 库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
+    <style>
+        :root {
+            --bg: #1a1b26;
+            --panel: #24283b;
+            --accent: #7aa2f7;
+            --text: #a9b1d6;
+            --border: #414868;
+            --grid-line: rgba(255, 255, 255, 0.05);
+        }
+
+        * { box-sizing: border-box; user-select: none; }
+        body {
+            margin: 0; height: 100vh; background: var(--bg); color: var(--text);
+            font-family: 'Courier New', Courier, monospace;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+        }
+
+        /* 顶部工具栏 */
+        .toolbar {
+            display: flex; gap: 10px; margin-bottom: 15px;
+            background: var(--panel); padding: 10px 20px; border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3); border: 1px solid var(--border);
+        }
+        
+        .tool-group { display: flex; gap: 5px; align-items: center; padding: 0 10px; border-right: 1px solid var(--border); }
+        .tool-group:last-child { border-right: none; }
+
+        button {
+            background: var(--bg); border: 1px solid var(--border); color: var(--text);
+            padding: 8px 12px; cursor: pointer; border-radius: 6px; font-family: inherit;
+            transition: 0.2s; display: flex; align-items: center; gap: 5px; font-size: 14px;
+        }
+        button:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+        button.active { background: var(--accent); color: #fff; box-shadow: inset 0 2px 5px rgba(0,0,0,0.2); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        input[type="color"] {
+            width: 40px; height: 40px; border: none; background: none; cursor: pointer; padding: 0;
+        }
+        input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type="color"]::-webkit-color-swatch { border: 2px solid var(--border); border-radius: 6px; }
+
+        /* 核心画布区 */
+        .workspace {
+            position: relative;
+            box-shadow: 0 0 50px rgba(0,0,0,0.5);
+            border: 2px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+            background-image: 
+                linear-gradient(45deg, #222 25%, transparent 25%), 
+                linear-gradient(-45deg, #222 25%, transparent 25%), 
+                linear-gradient(45deg, transparent 75%, #222 75%), 
+                linear-gradient(-45deg, transparent 75%, #222 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+        }
+
+        canvas { display: block; cursor: crosshair; image-rendering: pixelated; }
+
+        /* 播放控制条 */
+        .timeline {
+            margin-top: 20px; width: 512px;
+            background: var(--panel); padding: 10px; border-radius: 8px;
+            display: flex; flex-direction: column; gap: 8px;
+            border: 1px solid var(--border);
+        }
+        .timeline-controls { display: flex; justify-content: space-between; align-items: center; }
+        .progress-container { position: relative; height: 6px; background: #111; border-radius: 3px; width: 100%; overflow: hidden; }
+        .progress-bar { height: 100%; background: var(--accent); width: 0%; transition: width 0.1s linear; }
+        
+        /* 导出模态框 */
+        #loading {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); z-index: 999;
+            display: none; flex-direction: column; align-items: center; justify-content: center;
+        }
+        .spinner {
+            width: 50px; height: 50px; border: 5px solid #333; border-top-color: var(--accent);
+            border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 20px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* 调色板预设 */
+        .palette { display: flex; gap: 4px; flex-wrap: wrap; max-width: 160px; }
+        .swatch { width: 20px; height: 20px; border-radius: 3px; cursor: pointer; border: 1px solid rgba(255,255,255,0.2); }
+        .swatch:hover { transform: scale(1.2); z-index: 10; }
+
+    </style>
+</head>
+<body>
+
+    <div class="toolbar">
+        <!-- 工具 -->
+        <div class="tool-group">
+            <input type="color" id="colorPicker" value="#ff0055" title="Color">
+            <div class="palette" id="presetPalette"></div>
+        </div>
+        <div class="tool-group">
+            <button id="btnPen" class="active">✏️ Pen</button>
+            <button id="btnEraser">🧼 Eraser</button>
+        </div>
+        <div class="tool-group">
+            <button id="btnGrid">🕸️ Grid</button>
+            <button id="btnClear">🗑️ Clear</button>
+            <button id="btnUndo">↩️ Undo</button>
+        </div>
+    </div>
+
+    <div class="workspace">
+        <canvas id="pixelCanvas" width="512" height="512"></canvas>
+    </div>
+
+    <div class="timeline">
+        <div class="timeline-controls">
+            <span style="font-size: 12px;">HISTORY PLAYBACK</span>
+            <span id="stepCounter" style="font-size: 12px; font-family: monospace; color: #666;">Step: 0/0</span>
+        </div>
+        <div class="progress-container">
+            <div class="progress-bar" id="progressBar"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; margin-top: 5px;">
+            <button id="btnPlay" style="width: 100px;">▶ Play</button>
+            <button id="btnExportGIF" style="background: #73daca; color: #1a1b26; border-color: #73daca; font-weight: bold;">💾 Export GIF</button>
+        </div>
+    </div>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <h3 style="color: white;">Rendering GIF...</h3>
+        <p id="renderStatus" style="color: #888;">Processing frames</p>
+    </div>
+
+    <script>
+        // --- 配置与状态 ---
+        const CONFIG = {
+            gridSize: 32,     // 32x32 像素网格
+            canvasSize: 512,  // 画布物理尺寸
+            bgColor: null,    // 透明背景
+            gridColor: 'rgba(255, 255, 255, 0.1)'
+        };
+
+        const STATE = {
+            isDrawing: false,
+            tool: 'pen', // 'pen' or 'eraser'
+            color: '#ff0055',
+            pixels: Array(CONFIG.gridSize * CONFIG.gridSize).fill(null), // 存储颜色数据
+            history: [], // 历史记录栈 (每一步的 pixels 快照)
+            showGrid: true,
+            isPlaying: false
+        };
+
+        // --- DOM 元素 ---
+        const canvas = document.getElementById('pixelCanvas');
+        const ctx = canvas.getContext('2d');
+        const colorPicker = document.getElementById('colorPicker');
+        const progressBar = document.getElementById('progressBar');
+        const stepCounter = document.getElementById('stepCounter');
+        const loadingScreen = document.getElementById('loading');
+        const renderStatus = document.getElementById('renderStatus');
+        
+        const pixelSize = CONFIG.canvasSize / CONFIG.gridSize;
+
+        // --- 初始化 ---
+        function init() {
+            // 预设调色板
+            const colors = ['#f7768e', '#ff9e64', '#e0af68', '#9ece6a', '#7aa2f7', '#bb9af7', '#ffffff', '#000000'];
+            const palContainer = document.getElementById('presetPalette');
+            colors.forEach(c => {
+                const s = document.createElement('div');
+                s.className = 'swatch';
+                s.style.background = c;
+                s.onclick = () => setColor(c);
+                palContainer.appendChild(s);
+            });
+
+            // 初始化历史
+            saveHistory(true);
+            drawCanvas();
+
+            // 绑定工具事件
+            document.getElementById('btnPen').onclick = () => setTool('pen');
+            document.getElementById('btnEraser').onclick = () => setTool('eraser');
+            document.getElementById('btnGrid').onclick = toggleGrid;
+            document.getElementById('btnClear').onclick = clearCanvas;
+            document.getElementById('btnUndo').onclick = undo;
+            document.getElementById('btnPlay').onclick = togglePlayback;
+            document.getElementById('btnExportGIF').onclick = exportGIF;
+            
+            colorPicker.oninput = (e) => setColor(e.target.value);
+        }
+
+        // --- 绘图逻辑 ---
+        
+        function getGridPos(e) {
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / pixelSize);
+            const y = Math.floor((e.clientY - rect.top) / pixelSize);
+            return { x, y };
+        }
+
+        function paintPixel(x, y) {
+            if (x < 0 || x >= CONFIG.gridSize || y < 0 || y >= CONFIG.gridSize) return;
+            
+            const index = y * CONFIG.gridSize + x;
+            const newColor = STATE.tool === 'eraser' ? null : STATE.color;
+            
+            if (STATE.pixels[index] !== newColor) {
+                STATE.pixels[index] = newColor;
+                drawCanvas(); // 实时重绘
+            }
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            if(STATE.isPlaying) return;
+            STATE.isDrawing = true;
+            const {x, y} = getGridPos(e);
+            paintPixel(x, y);
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!STATE.isDrawing) return;
+            const {x, y} = getGridPos(e);
+            paintPixel(x, y);
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (STATE.isDrawing) {
+                STATE.isDrawing = false;
+                saveHistory();
+            }
+        });
+
+        // --- 渲染引擎 ---
+
+        function drawCanvas(pixelData = STATE.pixels) {
+            // 清空
+            ctx.clearRect(0, 0, CONFIG.canvasSize, CONFIG.canvasSize);
+
+            // 绘制像素
+            for (let i = 0; i < pixelData.length; i++) {
+                if (pixelData[i]) {
+                    const x = (i % CONFIG.gridSize) * pixelSize;
+                    const y = Math.floor(i / CONFIG.gridSize) * pixelSize;
+                    ctx.fillStyle = pixelData[i];
+                    ctx.fillRect(x, y, pixelSize, pixelSize);
+                }
+            }
+
+            // 绘制网格
+            if (STATE.showGrid) {
+                ctx.strokeStyle = CONFIG.gridColor;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let i = 0; i <= CONFIG.gridSize; i++) {
+                    const pos = i * pixelSize;
+                    ctx.moveTo(pos, 0); ctx.lineTo(pos, CONFIG.canvasSize);
+                    ctx.moveTo(0, pos); ctx.lineTo(CONFIG.canvasSize, pos);
+                }
+                ctx.stroke();
+            }
+        }
+
+        // --- 状态管理 ---
+
+        function setColor(c) {
+            STATE.color = c;
+            colorPicker.value = c;
+            setTool('pen');
+        }
+
+        function setTool(t) {
+            STATE.tool = t;
+            document.getElementById('btnPen').classList.toggle('active', t === 'pen');
+            document.getElementById('btnEraser').classList.toggle('active', t === 'eraser');
+        }
+
+        function toggleGrid() {
+            STATE.showGrid = !STATE.showGrid;
+            drawCanvas();
+        }
+
+        function saveHistory(initial = false) {
+            // 深拷贝当前像素数据
+            const snapshot = [...STATE.pixels];
+            
+            // 避免重复状态（如果不动鼠标点击）
+            if (!initial && STATE.history.length > 0) {
+                const last = STATE.history[STATE.history.length - 1];
+                if (JSON.stringify(last) === JSON.stringify(snapshot)) return;
+            }
+
+            STATE.history.push(snapshot);
+            updateUI();
+        }
+
+        function undo() {
+            if (STATE.isPlaying || STATE.history.length <= 1) return;
+            STATE.history.pop(); // 移除当前状态
+            STATE.pixels = [...STATE.history[STATE.history.length - 1]]; // 恢复上一个
+            drawCanvas();
+            updateUI();
+        }
+
+        function clearCanvas() {
+            STATE.pixels = Array(CONFIG.gridSize * CONFIG.gridSize).fill(null);
+            drawCanvas();
+            saveHistory();
+        }
+
+        function updateUI() {
+            stepCounter.innerText = `Step: ${STATE.history.length}`;
+            document.getElementById('btnUndo').disabled = STATE.history.length <= 1;
+        }
+
+        // --- 回放功能 ---
+
+        async function togglePlayback() {
+            if (STATE.isPlaying) return; // 防止重复点击
+            
+            STATE.isPlaying = true;
+            document.getElementById('btnPlay').innerText = '...Playing';
+            
+            // 临时保存当前状态（虽然通常就是history最后一个，但为了保险）
+            const currentPixels = [...STATE.pixels];
+
+            for (let i = 0; i < STATE.history.length; i++) {
+                STATE.pixels = STATE.history[i];
+                drawCanvas();
+                
+                // 更新进度条
+                const pct = ((i + 1) / STATE.history.length) * 100;
+                progressBar.style.width = `${pct}%`;
+                stepCounter.innerText = `Step: ${i + 1}/${STATE.history.length}`;
+
+                await new Promise(r => setTimeout(r, 100)); // 100ms 每帧
+            }
+
+            // 恢复
+            setTimeout(() => {
+                STATE.isPlaying = false;
+                document.getElementById('btnPlay').innerText = '▶ Play';
+                progressBar.style.width = '0%';
+                STATE.pixels = currentPixels;
+                drawCanvas();
+                updateUI();
+            }, 500);
+        }
+
+        // --- GIF 导出核心 (Magic Part) ---
+
+        async function exportGIF() {
+            if (STATE.history.length === 0) return;
+            
+            loadingScreen.style.display = 'flex';
+            
+            // 1. 解决 Worker 问题：创建一个 Blob URL 指向 CDN 的 Worker 代码
+            // 因为本地 file:// 无法加载跨域 worker，我们需要 Fetch 代码并转为 Blob
+            let workerBlobUrl = '';
+            try {
+                const response = await fetch('https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js');
+                const workerScript = await response.text();
+                const blob = new Blob([workerScript], { type: 'application/javascript' });
+                workerBlobUrl = URL.createObjectURL(blob);
+            } catch (e) {
+                alert('Error loading GIF worker. Ensure internet connection.');
+                loadingScreen.style.display = 'none';
+                return;
+            }
+
+            // 2. 初始化 GIF 编码器
+            const gif = new GIF({
+                workers: 2,
+                quality: 10,
+                workerScript: workerBlobUrl, // 使用 Blob URL
+                width: CONFIG.canvasSize,
+                height: CONFIG.canvasSize,
+                transparent: 0x000000 // 如果需要透明背景
+            });
+
+            // 3. 生成帧
+            // 我们使用一个临时的 Canvas 来绘制每一帧（不带网格）
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = CONFIG.canvasSize;
+            tempCanvas.height = CONFIG.canvasSize;
+            const tCtx = tempCanvas.getContext('2d');
+
+            STATE.history.forEach((framePixels, index) => {
+                renderStatus.innerText = `Processing frame ${index + 1}/${STATE.history.length}`;
+                
+                // 绘制这一帧到临时 Canvas
+                tCtx.clearRect(0, 0, CONFIG.canvasSize, CONFIG.canvasSize);
+                
+                // 背景色 (为了 GIF 不透明，通常填充一个背景色，或者保持透明)
+                tCtx.fillStyle = '#1a1b26'; // 使用背景色填充
+                tCtx.fillRect(0, 0, CONFIG.canvasSize, CONFIG.canvasSize);
+
+                for (let i = 0; i < framePixels.length; i++) {
+                    if (framePixels[i]) {
+                        const x = (i % CONFIG.gridSize) * pixelSize;
+                        const y = Math.floor(i / CONFIG.gridSize) * pixelSize;
+                        tCtx.fillStyle = framePixels[i];
+                        tCtx.fillRect(x, y, pixelSize, pixelSize);
+                    }
+                }
+
+                // 添加到 GIF，最后一帧停留更久
+                const delay = (index === STATE.history.length - 1) ? 2000 : 100;
+                gif.addFrame(tCtx, {copy: true, delay: delay});
+            });
+
+            // 4. 渲染与下载
+            gif.on('finished', (blob) => {
+                loadingScreen.style.display = 'none';
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'pixel_art_process.gif';
+                a.click();
+                URL.revokeObjectURL(workerBlobUrl); // 清理
+            });
+
+            renderStatus.innerText = 'Encoding GIF...';
+            gif.render();
+        }
+
+        // 启动
+        init();
+
+    </script>
+</body>
+</html>
+```
