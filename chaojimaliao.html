@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Mario 3 - Ultimate Fix</title>
+    <style>
+        body {
+            background-color: #202020;
+            color: white;
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-family: Arial, sans-serif;
+            overflow: hidden; /* Prevent scrolling */
+        }
+
+        /* Game Container */
+        #game-container {
+            position: relative;
+            width: 512px;
+            height: 448px;
+            max-width: 100%; /* Responsive for mobile */
+            aspect-ratio: 256/224;
+            background: #000;
+            box-shadow: 0 0 30px rgba(0,0,0,0.8);
+            border: 4px solid #444;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated; /* Retro look */
+        }
+
+        /* Start Overlay */
+        #overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+
+        button#start-btn {
+            background: #e60012;
+            color: white;
+            border: 4px solid white;
+            padding: 15px 40px;
+            font-size: 24px;
+            font-weight: bold;
+            font-family: 'Courier New', monospace;
+            cursor: pointer;
+            text-transform: uppercase;
+            box-shadow: 0 5px 0 #8b0000;
+        }
+        button#start-btn:active {
+            transform: translateY(4px);
+            box-shadow: none;
+        }
+
+        .instructions {
+            margin-top: 20px;
+            text-align: center;
+            line-height: 1.6;
+            color: #ccc;
+            font-size: 14px;
+        }
+
+        /* Mobile Controls */
+        #mobile-controls {
+            display: none; /* Shown via JS on touch devices */
+            width: 100%;
+            max-width: 512px;
+            height: 140px;
+            background: #333;
+            margin-top: 10px;
+            position: relative;
+        }
+
+        .dpad, .action-btns { position: absolute; top: 20px; }
+        .dpad { left: 20px; width: 100px; height: 100px; }
+        .action-btns { right: 20px; width: 120px; height: 100px; }
+
+        .btn {
+            background: rgba(255,255,255,0.1);
+            border: 2px solid #666;
+            position: absolute;
+            border-radius: 8px;
+        }
+        .btn:active { background: rgba(255,255,255,0.4); }
+
+        /* DPAD Positions */
+        .btn.left { top: 35px; left: 0; width: 35px; height: 35px; }
+        .btn.right { top: 35px; right: 0; width: 35px; height: 35px; }
+        .btn.up { top: 0; left: 35px; width: 35px; height: 35px; } /* Jump backup */
+        
+        /* Action Positions */
+        .btn.a { bottom: 10px; right: 0; width: 50px; height: 50px; background: #d32f2f; border-radius: 50%; color: white; line-height: 50px; text-align: center; font-weight: bold; }
+        .btn.b { top: 10px; left: 0; width: 50px; height: 50px; background: #fbc02d; border-radius: 50%; color: black; line-height: 50px; text-align: center; font-weight: bold; }
+
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="256" height="224"></canvas>
+        
+        <!-- Start Screen Overlay -->
+        <div id="overlay">
+            <h1 style="color:#f8b800; text-shadow: 4px 4px #000; font-family: monospace; font-size: 40px; margin: 0 0 20px 0;">SUPER MARIO JS</h1>
+            <button id="start-btn">CLICK TO START</button>
+            <div class="instructions">
+                <b>PC Controls:</b><br>
+                Move: Arrow Keys / WASD<br>
+                Jump: K / Space<br>
+                Run: J / Shift
+            </div>
+        </div>
+    </div>
+
+    <!-- Mobile Touch Controls -->
+    <div id="mobile-controls">
+        <div class="dpad">
+            <div class="btn left" data-key="left"></div>
+            <div class="btn right" data-key="right"></div>
+            <div class="btn up" data-key="up"></div> <!-- Helper for mobile -->
+        </div>
+        <div class="action-btns">
+            <div class="btn b" data-key="b">B</div>
+            <div class="btn a" data-key="a">A</div>
+        </div>
+    </div>
+
+<script>
+    // --- 1. Setup & Init ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('start-btn');
+    
+    let isRunning = false;
+    let animationId = null;
+
+    // Detect Mobile
+    if('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+        document.getElementById('mobile-controls').style.display = 'block';
+    }
+
+    // --- 2. Game Constants ---
+    const C = {
+        GRAVITY: 0.25,
+        ACCEL: 0.1,
+        FRICTION: 0.82,
+        MAX_SPEED: 1.6,
+        MAX_RUN: 2.8,
+        JUMP: -5.5
+    };
+
+    // --- 3. Input Handling ---
+    const keys = { left: false, right: false, up: false, a: false, b: false };
+
+    function bindInput() {
+        window.addEventListener('keydown', e => setKey(e.code, true));
+        window.addEventListener('keyup', e => setKey(e.code, false));
+
+        // Touch
+        document.querySelectorAll('.btn').forEach(btn => {
+            btn.addEventListener('touchstart', (e) => { e.preventDefault(); keys[btn.dataset.key] = true; });
+            btn.addEventListener('touchend', (e) => { e.preventDefault(); keys[btn.dataset.key] = false; });
+        });
+    }
+
+    function setKey(code, state) {
+        if(code === 'ArrowLeft' || code === 'KeyA') keys.left = state;
+        if(code === 'ArrowRight' || code === 'KeyD') keys.right = state;
+        if(code === 'ArrowUp' || code === 'KeyW') keys.up = state;
+        if(code === 'Space' || code === 'KeyK' || code === 'KeyX') keys.a = state;
+        if(code === 'ShiftLeft' || code === 'KeyJ' || code === 'KeyZ') keys.b = state;
+    }
+
+    // --- 4. Game Entities ---
+    const player = {
+        x: 30, y: 100, w: 12, h: 16,
+        vx: 0, vy: 0,
+        grounded: false,
+        dir: 1 // 1 right, -1 left
+    };
+
+    // Simple Level Map (1 = Ground, 2 = Block, 3 = Pipe)
+    const map = [];
+    // Generate floor
+    for(let i=0; i<200; i++) {
+        // Create pits
+        if(i > 40 && i < 43) continue;
+        if(i > 80 && i < 85) continue;
+        map.push({x: i*16, y: 192, w: 16, h: 32, type: 1});
+    }
+    // Add Blocks
+    map.push({x: 100, y: 128, w: 16, h: 16, type: 2});
+    map.push({x: 116, y: 128, w: 16, h: 16, type: 2});
+    map.push({x: 132, y: 128, w: 16, h: 16, type: 2});
+    map.push({x: 132, y: 64, w: 16, h: 16, type: 2}); // High block
+    
+    // Add Pipe
+    map.push({x: 200, y: 160, w: 32, h: 32, type: 3});
+
+    let cameraX = 0;
+
+    // --- 5. Core Game Loop ---
+    function update() {
+        // Horizontal Movement
+        if(keys.left) { player.vx -= C.ACCEL; player.dir = -1; }
+        if(keys.right) { player.vx += C.ACCEL; player.dir = 1; }
+        
+        // Friction
+        if(!keys.left && !keys.right) player.vx *= C.FRICTION;
+
+        // Speed Limit
+        let limit = keys.b ? C.MAX_RUN : C.MAX_SPEED;
+        player.vx = Math.max(Math.min(player.vx, limit), -limit);
+        if(Math.abs(player.vx) < 0.01) player.vx = 0;
+
+        // Jump
+        if((keys.a || keys.up) && player.grounded) {
+            player.vy = C.JUMP;
+            player.grounded = false;
+        }
+
+        // Gravity
+        player.vy += C.GRAVITY;
+
+        // Apply X
+        player.x += player.vx;
+        checkCollision(true);
+
+        // Apply Y
+        player.y += player.vy;
+        player.grounded = false; // Assume falling
+        checkCollision(false);
+
+        // Respawn if fallen
+        if(player.y > 250) {
+            player.x = cameraX + 30;
+            player.y = 0;
+            player.vx = 0;
+            player.vy = 0;
+        }
+
+        // Camera Follow
+        if(player.x > cameraX + 100) cameraX = player.x - 100;
+    }
+
+    function checkCollision(isX) {
+        for(let b of map) {
+            // AABB Collision
+            if(player.x < b.x + b.w &&
+               player.x + player.w > b.x &&
+               player.y < b.y + b.h &&
+               player.y + player.h > b.y) {
+                
+                if(isX) {
+                    if(player.vx > 0) player.x = b.x - player.w;
+                    else if(player.vx < 0) player.x = b.x + b.w;
+                    player.vx = 0;
+                } else {
+                    if(player.vy > 0) { // Landing
+                        player.y = b.y - player.h;
+                        player.grounded = true;
+                        player.vy = 0;
+                    } else if(player.vy < 0) { // Hitting head
+                        player.y = b.y + b.h;
+                        player.vy = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    function draw() {
+        // Clear Screen
+        ctx.fillStyle = "#5c94fc"; // Classic Mario Sky Blue
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.save();
+        ctx.translate(-Math.floor(cameraX), 0);
+
+        // Draw Map
+        for(let b of map) {
+            if(b.type === 1) { // Ground
+                ctx.fillStyle = "#d44c0c"; // Dark Orange
+                ctx.fillRect(b.x, b.y, b.w, b.h);
+                ctx.fillStyle = "#f8b800"; // Light Top
+                ctx.fillRect(b.x, b.y, b.w, 2);
+                ctx.fillStyle = "black"; // Outline
+                ctx.fillRect(b.x+15, b.y, 1, b.h);
+            } 
+            else if(b.type === 2) { // Brick
+                ctx.fillStyle = "#b84c0c";
+                ctx.fillRect(b.x, b.y, b.w, b.h);
+                ctx.strokeRect(b.x, b.y, b.w, b.h);
+            }
+            else if(b.type === 3) { // Pipe
+                ctx.fillStyle = "#00a800";
+                ctx.fillRect(b.x, b.y, b.w, b.h);
+                ctx.border = "2px solid #005000";
+            }
+        }
+
+        // Draw Player
+        // Shadow
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.fillRect(player.x + 4, player.y + 14, 8, 2);
+
+        // Mario Sprite (Simplified)
+        ctx.fillStyle = "#d01000"; // Red
+        ctx.fillRect(player.x, player.y+2, player.w, player.h-2); // Clothes
+        
+        ctx.fillStyle = "#f8b800"; // Skin
+        ctx.fillRect(player.x + (player.dir===1?4:2), player.y, 6, 6); // Head
+
+        // Eyes
+        ctx.fillStyle = "black";
+        if(player.dir === 1) ctx.fillRect(player.x + 8, player.y + 2, 2, 2);
+        else ctx.fillRect(player.x + 2, player.y + 2, 2, 2);
+
+        ctx.restore();
+
+        // Draw HUD
+        ctx.fillStyle = "white";
+        ctx.font = "10px Courier New";
+        ctx.fillText("WORLD 1-1", 20, 20);
+        ctx.fillText("SCORE: 0000", 180, 20);
+    }
+
+    function loop() {
+        if(!isRunning) return;
+        update();
+        draw();
+        animationId = requestAnimationFrame(loop);
+    }
+
+    // --- 6. Start Logic ---
+    startBtn.addEventListener('click', () => {
+        if(isRunning) return;
+        
+        // Hide overlay
+        overlay.style.display = 'none';
+        
+        // Focus window for keyboard input
+        window.focus();
+        
+        // Start Loop
+        isRunning = true;
+        bindInput();
+        loop();
+
+        console.log("Game Started!");
+    });
+
+</script>
+</body>
+</html>

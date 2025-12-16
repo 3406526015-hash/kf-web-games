@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voxel Temple of Heaven - 像素风天坛</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; font-family: 'Courier New', Courier, monospace; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: none;
+            user-select: none;
+            border: 2px solid #fff;
+        }
+        h1 { margin: 0 0 10px 0; font-size: 20px; text-transform: uppercase; letter-spacing: 2px; }
+        p { margin: 5px 0; font-size: 14px; }
+        .key { color: #ffd700; font-weight: bold; }
+        #toggle-btn {
+            pointer-events: auto;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #8a1c1c;
+            color: white;
+            border: 2px solid #fff;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            transition: background 0.3s;
+        }
+        #toggle-btn:hover { background: #b32424; }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-size: 24px; font-weight: bold; text-shadow: 2px 2px 4px #000;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">正在构建体素世界... (Generating Voxels)</div>
+    <div id="canvas-container"></div>
+    
+    <div id="ui-layer">
+        <h1>Voxel Temple of Heaven</h1>
+        <p>当前模式: <span id="mode-text" class="key">上帝视角 (God View)</span></p>
+        <p>操作: <span id="controls-text">左键旋转 / 滚轮缩放</span></p>
+        <button id="toggle-btn">按 'F' 切换游客视角</button>
+    </div>
+
+    <!-- 引入 Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- 引入 OrbitControls -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- 引入 PointerLockControls -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+
+    <script>
+        // ==========================================
+        // 1. 配置与常量 (Configuration)
+        // ==========================================
+        const COLORS = {
+            ROOF: 0x1e3c70,    // 深蓝琉璃瓦
+            WALL: 0x8a1c1c,    // 朱红墙体
+            BASE: 0xe8e8e8,    // 汉白玉白
+            GOLD: 0xffd700,    // 金色宝顶
+            GROUND: 0x556b2f,  // 深绿草地
+            PATH: 0x808080,    // 石板路
+            WOOD: 0x5c4033,    // 树干
+            LEAVES: 0x2d5a27   // 树叶
+        };
+
+        const WORLD_SIZE = 160; // 地图半径
+        const VOXEL_SIZE = 1;
+
+        // ==========================================
+        // 2. 场景初始化 (Scene Setup)
+        // ==========================================
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // 天空蓝
+        scene.fog = new THREE.Fog(0x87CEEB, 50, 250);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // 灯光系统
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(100, 150, 50);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 0.5;
+        dirLight.shadow.camera.far = 300;
+        dirLight.shadow.camera.left = -100;
+        dirLight.shadow.camera.right = 100;
+        dirLight.shadow.camera.top = 100;
+        dirLight.shadow.camera.bottom = -100;
+        scene.add(dirLight);
+
+        // ==========================================
+        // 3. 体素生成引擎 (Voxel Engine)
+        // ==========================================
+        
+        // 存储所有体素位置数据，按颜色分类
+        const voxelData = {};
+        for (let key in COLORS) voxelData[COLORS[key]] = [];
+
+        // 高度图，用于物理碰撞 (x,z) -> max_y
+        const heightMap = new Map();
+
+        function setHeight(x, y, z) {
+            const key = `${Math.round(x)},${Math.round(z)}`;
+            const currentH = heightMap.get(key) || 0;
+            if (y + 1 > currentH) heightMap.set(key, y + 1);
+        }
+
+        function addVoxel(x, y, z, color) {
+            // 简单的剔除：如果看不到内部，可以优化（此处为了简单不做复杂剔除，依赖InstancedMesh性能）
+            voxelData[color].push({ x, y, z });
+            setHeight(x, y, z);
+        }
+
+        // 辅助函数：生成圆柱体/圆台
+        function createCylinder(cx, cz, yStart, height, radius, color, isHollow = false) {
+            const r2 = radius * radius;
+            const innerR2 = (radius - 1) * (radius - 1);
+            for (let y = yStart; y < yStart + height; y++) {
+                for (let x = -radius; x <= radius; x++) {
+                    for (let z = -radius; z <= radius; z++) {
+                        const dist = x*x + z*z;
+                        if (dist <= r2) {
+                            if (!isHollow || dist > innerR2) {
+                                addVoxel(cx + x, y, cz + z, color);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 辅助函数：生成圆锥屋顶
+        function createCone(cx, cz, yStart, height, radiusBottom, radiusTop, color) {
+            for (let y = 0; y < height; y++) {
+                const progress = y / height;
+                const r = radiusBottom * (1 - progress) + radiusTop * progress;
+                const r2 = r * r;
+                const currentY = yStart + y;
+                for (let x = -Math.ceil(r); x <= Math.ceil(r); x++) {
+                    for (let z = -Math.ceil(r); z <= Math.ceil(r); z++) {
+                        if (x*x + z*z <= r2) {
+                            addVoxel(cx + x, currentY, cz + z, color);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 4. 场景构建逻辑 (Scene Construction)
+        // ==========================================
+
+        function buildScene() {
+            // --- 1. 地面与环境 ---
+            // 地面 (草地)
+            for (let x = -WORLD_SIZE/2; x < WORLD_SIZE/2; x++) {
+                for (let z = -WORLD_SIZE/2; z < WORLD_SIZE/2; z++) {
+                    // 丹陛桥 (神道) - 南向
+                    if (Math.abs(x) < 6 && z > 25) {
+                        addVoxel(x, 0, z, COLORS.PATH);
+                    } else {
+                        // 随机草地高度变化
+                        const h = Math.random() > 0.9 ? 1 : 0;
+                        addVoxel(x, h - 1, z, COLORS.GROUND); 
+                    }
+                }
+            }
+
+            // 围墙 (天圆地方)
+            const wallH = 4;
+            const wallR = WORLD_SIZE/2 - 2;
+            for(let x = -wallR; x <= wallR; x++) {
+                addVoxel(x, 0, -wallR, COLORS.WALL); addVoxel(x, 1, -wallR, COLORS.WALL);
+                addVoxel(x, 0, wallR, COLORS.WALL); addVoxel(x, 1, wallR, COLORS.WALL);
+            }
+            for(let z = -wallR; z <= wallR; z++) {
+                addVoxel(-wallR, 0, z, COLORS.WALL); addVoxel(-wallR, 1, z, COLORS.WALL);
+                addVoxel(wallR, 0, z, COLORS.WALL); addVoxel(wallR, 1, z, COLORS.WALL);
+            }
+
+            // --- 2. 祈年殿主体 ---
+            
+            // 三层汉白玉台基 (Circular Base)
+            // 第一层
+            createCylinder(0, 0, 0, 2, 32, COLORS.BASE);
+            // 第二层
+            createCylinder(0, 0, 2, 2, 26, COLORS.BASE);
+            // 第三层
+            createCylinder(0, 0, 4, 2, 20, COLORS.BASE);
+
+            // 殿身 (Red Body)
+            createCylinder(0, 0, 6, 12, 14, COLORS.WALL, true); // 墙体
+            // 内部柱子 (简化)
+            createCylinder(0, 0, 6, 12, 2, COLORS.WALL); 
+
+            // 三重檐屋顶 (Triple Roof)
+            // 下层檐
+            createCone(0, 0, 10, 3, 18, 15, COLORS.ROOF);
+            // 中层檐
+            createCone(0, 0, 13, 3, 14, 11, COLORS.ROOF);
+            // 上层檐
+            createCone(0, 0, 16, 4, 10, 2, COLORS.ROOF);
+
+            // 宝顶 (Gold Finial)
+            createCylinder(0, 0, 20, 2, 1, COLORS.GOLD);
+            addVoxel(0, 22, 0, COLORS.GOLD);
+
+            // --- 3. 植被 (Ancient Cypress) ---
+            const treeCount = 150;
+            for (let i = 0; i < treeCount; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const dist = 40 + Math.random() * (WORLD_SIZE/2 - 45);
+                const tx = Math.cos(angle) * dist;
+                const tz = Math.sin(angle) * dist;
+
+                // 避开神道
+                if (Math.abs(tx) < 8 && tz > 0) continue;
+
+                // 树干
+                const h = 4 + Math.floor(Math.random() * 4);
+                for(let y=0; y<h; y++) addVoxel(Math.round(tx), y, Math.round(tz), COLORS.WOOD);
+                
+                // 树叶 (Blob)
+                const lr = 2 + Math.floor(Math.random() * 2);
+                for(let lx = -lr; lx <= lr; lx++) {
+                    for(let ly = -lr; ly <= lr; ly++) {
+                        for(let lz = -lr; lz <= lr; lz++) {
+                            if (lx*lx + ly*ly + lz*lz <= lr*lr) {
+                                addVoxel(Math.round(tx)+lx, h+ly+1, Math.round(tz)+lz, COLORS.LEAVES);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 执行构建
+        buildScene();
+
+        // ==========================================
+        // 5. 渲染优化 (InstancedMesh)
+        // ==========================================
+        
+        const geometry = new THREE.BoxGeometry(1, 1, 1);
+        const materialDict = {};
+
+        // 创建材质
+        for (let colorVal in voxelData) {
+            materialDict[colorVal] = new THREE.MeshLambertMaterial({ color: parseInt(colorVal) });
+        }
+
+        // 生成 InstancedMesh
+        const dummy = new THREE.Object3D();
+        for (let colorVal in voxelData) {
+            const positions = voxelData[colorVal];
+            if (positions.length === 0) continue;
+
+            const mesh = new THREE.InstancedMesh(geometry, materialDict[colorVal], positions.length);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+
+            for (let i = 0; i < positions.length; i++) {
+                const { x, y, z } = positions[i];
+                dummy.position.set(x, y, z);
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
+            }
+            
+            scene.add(mesh);
+        }
+
+        document.getElementById('loading').style.display = 'none';
+
+        // ==========================================
+        // 6. 交互与视角控制 (Interaction)
+        // ==========================================
+
+        let isTouristMode = false;
+        
+        // 上帝视角控制
+        const orbitControls = new THREE.OrbitControls(camera, renderer.domElement);
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.maxPolarAngle = Math.PI / 2 - 0.1; // 防止钻入地下
+        
+        // 初始位置
+        function setGodView() {
+            camera.position.set(0, 60, 100);
+            camera.lookAt(0, 10, 0);
+            orbitControls.enabled = true;
+            orbitControls.target.set(0, 10, 0);
+        }
+        setGodView();
+
+        // 游客视角控制
+        const pointerControls = new THREE.PointerLockControls(camera, document.body);
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        const moveState = { forward: false, backward: false, left: false, right: false };
+
+        // 键盘事件
+        const onKeyDown = function (event) {
+            switch (event.code) {
+                case 'ArrowUp': case 'KeyW': moveState.forward = true; break;
+                case 'ArrowLeft': case 'KeyA': moveState.left = true; break;
+                case 'ArrowDown': case 'KeyS': moveState.backward = true; break;
+                case 'ArrowRight': case 'KeyD': moveState.right = true; break;
+                case 'KeyF': toggleMode(); break;
+            }
+        };
+        const onKeyUp = function (event) {
+            switch (event.code) {
+                case 'ArrowUp': case 'KeyW': moveState.forward = false; break;
+                case 'ArrowLeft': case 'KeyA': moveState.left = false; break;
+                case 'ArrowDown': case 'KeyS': moveState.backward = false; break;
+                case 'ArrowRight': case 'KeyD': moveState.right = false; break;
+            }
+        };
+        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('keyup', onKeyUp);
+
+        // 模式切换逻辑
+        const btn = document.getElementById('toggle-btn');
+        const modeText = document.getElementById('mode-text');
+        const controlsText = document.getElementById('controls-text');
+
+        function toggleMode() {
+            if (isTouristMode) {
+                // 退出游客模式
+                pointerControls.unlock();
+            } else {
+                // 进入游客模式
+                pointerControls.lock();
+            }
+        }
+
+        btn.addEventListener('click', toggleMode);
+
+        pointerControls.addEventListener('lock', function () {
+            isTouristMode = true;
+            orbitControls.enabled = false;
+            // 设置初始游客位置 (在神道上)
+            camera.position.set(0, 2, 60); 
+            camera.lookAt(0, 5, 0);
+            
+            modeText.textContent = "游客视角 (Tourist View)";
+            controlsText.textContent = "WASD 移动 / 鼠标看四周";
+            btn.textContent = "按 Esc 退出 / 按 F 切换";
+            modeText.style.color = "#ff4444";
+        });
+
+        pointerControls.addEventListener('unlock', function () {
+            isTouristMode = false;
+            setGodView();
+            
+            modeText.textContent = "上帝视角 (God View)";
+            controlsText.textContent = "左键旋转 / 滚轮缩放";
+            btn.textContent = "按 'F' 切换游客视角";
+            modeText.style.color = "#ffd700";
+        });
+
+        // ==========================================
+        // 7. 物理与动画循环 (Physics & Loop)
+        // ==========================================
+
+        const clock = new THREE.Clock();
+
+        function updatePhysics(delta) {
+            if (!isTouristMode) return;
+
+            // 摩擦力
+            velocity.x -= velocity.x * 10.0 * delta;
+            velocity.z -= velocity.z * 10.0 * delta;
+
+            direction.z = Number(moveState.forward) - Number(moveState.backward);
+            direction.x = Number(moveState.right) - Number(moveState.left);
+            direction.normalize();
+
+            const speed = 40.0; // 移动速度
+            if (moveState.forward || moveState.backward) velocity.z -= direction.z * speed * delta;
+            if (moveState.left || moveState.right) velocity.x -= direction.x * speed * delta;
+
+            pointerControls.moveRight(-velocity.x * delta);
+            pointerControls.moveForward(-velocity.z * delta);
+
+            // 地面高度检测 (简单的重力与碰撞)
+            const camPos = camera.position;
+            
+            // 边界限制
+            if (camPos.x < -WORLD_SIZE/2) camPos.x = -WORLD_SIZE/2;
+            if (camPos.x > WORLD_SIZE/2) camPos.x = WORLD_SIZE/2;
+            if (camPos.z < -WORLD_SIZE/2) camPos.z = -WORLD_SIZE/2;
+            if (camPos.z > WORLD_SIZE/2) camPos.z = WORLD_SIZE/2;
+
+            // 获取当前位置的地面高度
+            const gridX = Math.round(camPos.x);
+            const gridZ = Math.round(camPos.z);
+            const key = `${gridX},${gridZ}`;
+            
+            let groundHeight = 0; // 默认草地高度
+            if (heightMap.has(key)) {
+                groundHeight = heightMap.get(key);
+            }
+
+            // 模拟行走高度 (眼睛高度 1.7m)
+            const targetY = groundHeight + 1.7;
+            
+            // 平滑高度过渡 (上台阶)
+            camPos.y += (targetY - camPos.y) * 10 * delta;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const delta = clock.getDelta();
+
+            if (isTouristMode) {
+                updatePhysics(delta);
+            } else {
+                orbitControls.update();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // 窗口调整
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+
+    </script>
+</body>
+</html>

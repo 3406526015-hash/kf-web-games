@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>V8 Engine Control Deck</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Segoe UI', sans-serif; user-select: none; }
+        
+        /* --- UI 布局 --- */
+        #ui-container {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        /* 顶部标题 */
+        .header {
+            padding: 20px;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent);
+            color: #00ffff;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        }
+        .header h1 { margin: 0; font-size: 24px; }
+        .header span { font-size: 12px; color: #666; }
+
+        /* 底部控制台 */
+        .control-deck {
+            pointer-events: auto;
+            background: rgba(10, 15, 20, 0.85);
+            backdrop-filter: blur(10px);
+            border-top: 2px solid #00ffff;
+            padding: 20px 40px;
+            display: flex;
+            gap: 40px;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 -10px 30px rgba(0, 255, 255, 0.1);
+        }
+
+        /* 控制组 */
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 200px;
+        }
+        .control-label {
+            color: #00ffff;
+            font-size: 12px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+        }
+        .value-display { color: #fff; font-family: monospace; }
+
+        /* 自定义滑块样式 */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+        input[type=range]:focus { outline: none; }
+        
+        /* 滑块轨道 */
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #333;
+            border-radius: 2px;
+            border: 1px solid #555;
+        }
+        
+        /* 滑块滑块头 */
+        input[type=range]::-webkit-slider-thumb {
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #00ffff;
+            cursor: pointer;
+            -webkit-appearance: none;
+            margin-top: -7px; /* 居中 */
+            box-shadow: 0 0 10px #00ffff;
+            transition: transform 0.1s;
+        }
+        input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+        /* 颜色选择器 */
+        input[type=color] {
+            -webkit-appearance: none;
+            border: none;
+            width: 100%;
+            height: 30px;
+            background: none;
+            cursor: pointer;
+        }
+        input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type=color]::-webkit-color-swatch { border: 1px solid #555; border-radius: 4px; }
+
+        /* 仪表盘 */
+        .rpm-gauge {
+            position: absolute;
+            top: 20px; right: 20px;
+            text-align: right;
+            color: #fff;
+        }
+        .rpm-big { font-size: 48px; font-weight: bold; font-family: monospace; color: #00ffff; }
+        .rpm-label { font-size: 14px; color: #888; }
+
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-container">
+        <div class="header">
+            <h1>V8 Kinetic Simulator</h1>
+            <span>MANUAL OVERRIDE SYSTEM // V.2.0</span>
+        </div>
+
+        <div class="rpm-gauge">
+            <div class="rpm-big" id="rpm-display">0800</div>
+            <div class="rpm-label">REVOLUTIONS PER MINUTE</div>
+        </div>
+
+        <div class="control-deck">
+            <!-- 速度控制 -->
+            <div class="control-group">
+                <div class="control-label">
+                    ENGINE SPEED (RPM)
+                    <span class="value-display" id="val-speed">800</span>
+                </div>
+                <input type="range" id="input-speed" min="0" max="6000" value="800" step="10">
+            </div>
+
+            <!-- 透明度控制 -->
+            <div class="control-group">
+                <div class="control-label">
+                    CASING OPACITY
+                    <span class="value-display" id="val-opacity">15%</span>
+                </div>
+                <input type="range" id="input-opacity" min="0" max="1" value="0.15" step="0.01">
+            </div>
+
+            <!-- 辉光强度 -->
+            <div class="control-group">
+                <div class="control-label">
+                    BLOOM INTENSITY
+                    <span class="value-display" id="val-bloom">1.5</span>
+                </div>
+                <input type="range" id="input-bloom" min="0" max="3" value="1.5" step="0.1">
+            </div>
+
+            <!-- 点火颜色 -->
+            <div class="control-group" style="min-width: 100px;">
+                <div class="control-label">IGNITION COLOR</div>
+                <input type="color" id="input-color" value="#ff5500">
+            </div>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // --- 全局参数对象 ---
+        const params = {
+            rpm: 800,
+            casingOpacity: 0.15,
+            bloomStrength: 1.5,
+            ignitionColor: new THREE.Color(0xff5500),
+            crankAngle: 0
+        };
+
+        // --- 1. 场景初始化 ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x050505);
+        scene.fog = new THREE.FogExp2(0x050505, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(10, 6, 10);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // --- 2. 后处理 (Bloom) ---
+        const renderScene = new RenderPass(scene, camera);
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0.2;
+        bloomPass.strength = params.bloomStrength;
+        bloomPass.radius = 0.5;
+
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // --- 3. 灯光 ---
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+        // 底部蓝色氛围光
+        const bottomLight = new THREE.PointLight(0x00ffff, 1, 20);
+        bottomLight.position.set(0, -5, 0);
+        scene.add(bottomLight);
+
+        // --- 4. 材质定义 ---
+        const matMetal = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.4, metalness: 0.8 });
+        const matPiston = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.3, metalness: 0.5 });
+        const matRod = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.4, metalness: 0.6 });
+        // 气缸外壳材质 (透明度可调)
+        const matCasing = new THREE.MeshPhongMaterial({ 
+            color: 0x00ffff, 
+            transparent: true, 
+            opacity: params.casingOpacity, 
+            side: THREE.DoubleSide,
+            shininess: 100
+        });
+        const matWire = new THREE.LineBasicMaterial({ color: 0x004444, transparent: true, opacity: 0.3 });
+
+        // --- 5. V8 发动机构建 ---
+        const engineGroup = new THREE.Group();
+        scene.add(engineGroup);
+
+        // 机械尺寸参数
+        const CRANK_RADIUS = 1.0;
+        const ROD_LENGTH = 3.5;
+        const PISTON_RADIUS = 0.9;
+        const CYLINDER_SPACING = 1.3;
+        
+        // 存储部件引用
+        const parts = {
+            crankshaft: null,
+            pistons: [] // { mesh, rod, pinOffset, bankAngle, zPos }
+        };
+
+        // A. 创建曲轴
+        const crankGroup = new THREE.Group();
+        parts.crankshaft = crankGroup;
+        engineGroup.add(crankGroup);
+
+        // 主轴
+        const shaftGeo = new THREE.CylinderGeometry(0.3, 0.3, 10, 16);
+        const shaftMesh = new THREE.Mesh(shaftGeo, matMetal);
+        shaftMesh.rotation.z = Math.PI / 2;
+        crankGroup.add(shaftMesh);
+
+        // 十字曲轴角度: 0, 90, 270, 180
+        const throwAngles = [0, Math.PI/2, Math.PI*1.5, Math.PI];
+
+        // B. 创建气缸组件函数
+        function createCylinder(bankIndex, cylIndex, crankIndex) {
+            const isRightBank = bankIndex === 0;
+            const bankAngle = isRightBank ? Math.PI/4 : -Math.PI/4; // +/- 45度
+            const zPos = (cylIndex - 1.5) * CYLINDER_SPACING * 2 + (isRightBank ? -0.2 : 0.2);
+            
+            // 1. 活塞
+            const pistonGeo = new THREE.CylinderGeometry(PISTON_RADIUS, PISTON_RADIUS, 1.2, 32);
+            const piston = new THREE.Mesh(pistonGeo, matPiston.clone()); // 独立材质用于变色
+            piston.rotation.z = -bankAngle; // 初始旋转对齐气缸
+            engineGroup.add(piston);
+
+            // 2. 连杆
+            const rodGroup = new THREE.Group();
+            // 连杆杆身
+            const rodGeo = new THREE.BoxGeometry(0.3, ROD_LENGTH, 0.3);
+            const rodMesh = new THREE.Mesh(rodGeo, matRod);
+            rodMesh.position.y = ROD_LENGTH / 2;
+            rodGroup.add(rodMesh);
+            // 连杆大头
+            const bigEnd = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.4, 16), matRod);
+            bigEnd.rotation.x = Math.PI/2;
+            rodGroup.add(bigEnd);
+            // 连杆小头
+            const smallEnd = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.4, 16), matRod);
+            smallEnd.rotation.x = Math.PI/2;
+            smallEnd.position.y = ROD_LENGTH;
+            rodGroup.add(smallEnd);
+            
+            engineGroup.add(rodGroup);
+
+            // 3. 气缸外壳 (Visual)
+            const casingGeo = new THREE.CylinderGeometry(PISTON_RADIUS+0.1, PISTON_RADIUS+0.1, 5, 16, 1, true);
+            const casing = new THREE.Mesh(casingGeo, matCasing);
+            
+            // 计算气缸位置和朝向
+            const dirX = Math.sin(bankAngle);
+            const dirY = Math.cos(bankAngle);
+            casing.position.set(dirX * 3.5, dirY * 3.5, zPos);
+            casing.rotation.z = -bankAngle;
+            engineGroup.add(casing);
+
+            // 气缸线框
+            const edges = new THREE.EdgesGeometry(casingGeo);
+            const line = new THREE.LineSegments(edges, matWire);
+            casing.add(line);
+
+            // 4. 曲轴上的配重块 (Visual) - 仅在曲轴组里添加一次
+            if (bankIndex === 0) {
+                const armGeo = new THREE.BoxGeometry(0.8, 2.2, 0.4);
+                const arm = new THREE.Mesh(armGeo, matMetal);
+                arm.position.z = zPos - (isRightBank ? -0.2 : 0.2); // 回到中心轴线
+                arm.rotation.z = throwAngles[crankIndex];
+                crankGroup.add(arm);
+                
+                // 曲柄销
+                const pinGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.8, 16);
+                const pin = new THREE.Mesh(pinGeo, matMetal);
+                pin.rotation.x = Math.PI/2;
+                pin.position.set(
+                    Math.cos(throwAngles[crankIndex] + Math.PI/2) * CRANK_RADIUS,
+                    Math.sin(throwAngles[crankIndex] + Math.PI/2) * CRANK_RADIUS,
+                    arm.position.z
+                );
+                crankGroup.add(pin);
+            }
+
+            // 保存数据用于动画
+            parts.pistons.push({
+                mesh: piston,
+                rod: rodGroup,
+                casing: casing, // 用于更新透明度
+                bankAngle: bankAngle,
+                pinOffset: throwAngles[crankIndex],
+                zPos: zPos,
+                dir: new THREE.Vector3(Math.sin(bankAngle), Math.cos(bankAngle), 0)
+            });
+        }
+
+        // 生成8个气缸
+        for(let i=0; i<4; i++) {
+            createCylinder(0, i, i); // Right Bank
+            createCylinder(1, i, i); // Left Bank
+        }
+
+        // --- 6. 交互控制逻辑 ---
+        const inputSpeed = document.getElementById('input-speed');
+        const inputOpacity = document.getElementById('input-opacity');
+        const inputBloom = document.getElementById('input-bloom');
+        const inputColor = document.getElementById('input-color');
+
+        // 监听器
+        inputSpeed.addEventListener('input', (e) => {
+            params.rpm = parseInt(e.target.value);
+            document.getElementById('val-speed').innerText = params.rpm;
+            document.getElementById('rpm-display').innerText = params.rpm.toString().padStart(4, '0');
+        });
+
+        inputOpacity.addEventListener('input', (e) => {
+            params.casingOpacity = parseFloat(e.target.value);
+            document.getElementById('val-opacity').innerText = Math.round(params.casingOpacity * 100) + "%";
+            matCasing.opacity = params.casingOpacity;
+        });
+
+        inputBloom.addEventListener('input', (e) => {
+            params.bloomStrength = parseFloat(e.target.value);
+            document.getElementById('val-bloom').innerText = params.bloomStrength;
+            bloomPass.strength = params.bloomStrength;
+        });
+
+        inputColor.addEventListener('input', (e) => {
+            params.ignitionColor.set(e.target.value);
+        });
+
+
+        // --- 7. 动画循环 ---
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        function updateEngine() {
+            // 1. 更新曲轴角度
+            // RPM 转 弧度/帧: (RPM / 60) * 2PI / 60fps
+            const speedRad = (params.rpm / 60) * Math.PI * 2 * (1/60);
+            params.crankAngle += speedRad;
+            parts.crankshaft.rotation.z = params.crankAngle;
+
+            // 2. 更新活塞和连杆
+            parts.pistons.forEach(p => {
+                // 计算曲柄销的世界位置 (简化版)
+                // 销的角度 = 曲轴总角度 + 销的偏移 + 90度相位
+                const currentPinAngle = params.crankAngle + p.pinOffset + Math.PI/2;
+                
+                const pinX = Math.cos(currentPinAngle) * CRANK_RADIUS;
+                const pinY = Math.sin(currentPinAngle) * CRANK_RADIUS;
+                
+                // 投影到气缸轴线坐标系
+                // 旋转坐标系 -bankAngle
+                const alpha = -p.bankAngle;
+                const rotPinX = pinX * Math.cos(alpha) - pinY * Math.sin(alpha);
+                const rotPinY = pinX * Math.sin(alpha) + pinY * Math.cos(alpha);
+
+                // 计算连杆在轴线上的垂直投影长度
+                // l^2 = x^2 + y^2 -> y = sqrt(l^2 - x^2)
+                // x在这里是 rotPinX (横向偏移)
+                const rodY = Math.sqrt(ROD_LENGTH**2 - rotPinX**2);
+
+                // 活塞距离中心的距离
+                const pistonDist = rotPinY + rodY;
+
+                // 设置活塞位置
+                p.mesh.position.set(
+                    p.dir.x * pistonDist,
+                    p.dir.y * pistonDist,
+                    p.zPos
+                );
+
+                // 设置连杆位置 (曲柄销 和 活塞 的中点)
+                const pinPos = new THREE.Vector3(pinX, pinY, p.zPos);
+                p.rod.position.copy(pinPos).add(p.mesh.position).multiplyScalar(0.5);
+                
+                // 设置连杆朝向
+                p.rod.lookAt(p.mesh.position);
+                p.rod.rotateX(Math.PI/2); // 修正Cylinder轴向
+
+                // 点火特效
+                // 当活塞接近上止点 (Top Dead Center)
+                const maxDist = CRANK_RADIUS + ROD_LENGTH;
+                const compression = pistonDist / maxDist;
+                
+                if (compression > 0.995 && params.rpm > 0) {
+                    p.mesh.material.color.copy(params.ignitionColor);
+                    p.mesh.material.emissive.copy(params.ignitionColor);
+                    p.mesh.material.emissiveIntensity = 2;
+                } else {
+                    // 快速冷却
+                    p.mesh.material.color.lerp(new THREE.Color(0xcccccc), 0.15);
+                    p.mesh.material.emissive.setHex(0x000000);
+                }
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            updateEngine();
+            controls.update();
+            composer.render();
+        }
+
+        // 窗口自适应
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+
+    </script>
+</body>
+</html>
